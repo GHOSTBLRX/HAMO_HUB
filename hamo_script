@@ -1,0 +1,3129 @@
+--[[
+    ╔══════════════════════════════════════════════════════════════╗
+    ║   HAMO RBX  v27.2  •  Neon Glass Edition                     ║
+    ║   Anime Pack + Break & Steal v2 + Anti-Hit v2 + New UI       ║
+    ╚══════════════════════════════════════════════════════════════╝
+]]
+
+local function Boot()
+-- كل خدمة تُجلب بحماية: بعض المنفّذات (خصوصاً على الجوال) ترمي خطأ
+-- عند طلب CoreGui أو VirtualUser بهوية منخفضة، وهذا كان يُسقِط السكربت كاملاً.
+local function Svc(name)
+    local ok, s = pcall(function() return game:GetService(name) end)
+    if ok then return s end
+    return nil
+end
+
+local Players          = Svc("Players")
+local RunService       = Svc("RunService")
+local UIS              = Svc("UserInputService")
+local TweenService     = Svc("TweenService")
+local CoreGui          = Svc("CoreGui")
+local PPS              = Svc("ProximityPromptService")
+local VirtualUser      = Svc("VirtualUser")
+local RS               = Svc("ReplicatedStorage")
+local TextChatService  = Svc("TextChatService")
+local StarterGui       = Svc("StarterGui")
+local Player           = Players and Players.LocalPlayer
+local lower            = string.lower
+
+assert(Players and Player, "LocalPlayer غير متاح")
+assert(RunService and UIS and TweenService, "خدمات أساسية غير متاحة")
+assert(RS, "ReplicatedStorage غير متاح")
+
+---------------------------------------------------------
+-- الحماية من التكرار
+---------------------------------------------------------
+local function GuiParent()
+    local cands = {}
+    -- 1) gethui (أفضل مكان: محمي من الإخفاء)
+    if type(gethui) == "function" then
+        local ok, ui = pcall(gethui)
+        if ok and ui then table.insert(cands, ui) end
+    end
+    -- 2) CoreGui (قد يكون محجوباً على الجوال)
+    if CoreGui then table.insert(cands, CoreGui) end
+    -- 3) PlayerGui (يعمل دائماً حتى بهوية 2)
+    local pg = Player and Player:FindFirstChild("PlayerGui")
+    if pg then table.insert(cands, pg) end
+
+    for _, p in ipairs(cands) do
+        -- اختبار حقيقي: هل يمكن إنشاء عنصر داخل هذا الحاوي؟
+        local ok = pcall(function()
+            local t = Instance.new("Folder")
+            t.Parent = p
+            t:Destroy()
+        end)
+        if ok then return p end
+    end
+    return pg or CoreGui
+end
+
+pcall(function()
+    local gp = GuiParent()
+    if not gp then return end
+    local old = gp:FindFirstChild("HamoUltimateHub")
+    if old then old:Destroy() end
+end)
+
+---------------------------------------------------------
+-- الأساسيات
+---------------------------------------------------------
+local Alive = true
+_G.HamoStep = "البداية"
+local function Step(s) _G.HamoStep = s end
+local State, Conns, Cleanups, Shared = {}, {}, {}, {}
+local Gen = {}
+
+local function Track(c) table.insert(Conns, c) return c end
+local function GetRoot() local c = Player.Character return c and c:FindFirstChild("HumanoidRootPart") end
+local function GetHum()  local c = Player.Character return c and c:FindFirstChildOfClass("Humanoid") end
+
+-- حلقات آمنة ضد التكرار (جيل لكل مفتاح)
+local function Loop(key, interval, fn)
+    Gen[key] = (Gen[key] or 0) + 1
+    local my = Gen[key]
+    task.spawn(function()
+        while Alive and State[key] and Gen[key] == my do
+            local ok, e = pcall(fn)
+            if not ok then warn("[HAMO:" .. key .. "] " .. tostring(e)) end
+            task.wait(interval)
+            if Gen[key] ~= my then break end
+        end
+    end)
+end
+
+local function Chat(msg)
+    pcall(function()
+        if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+            local ch = TextChatService.TextChannels:FindFirstChild("RBXGeneral")
+            if ch then ch:SendAsync(msg) end
+        else
+            local ev = RS:FindFirstChild("DefaultChatSystemChatEvents")
+            local say = ev and ev:FindFirstChild("SayMessageRequest")
+            if say then say:FireServer(msg, "All") end
+        end
+    end)
+end
+
+---------------------------------------------------------
+-- Remotes (بحث أعمق)
+---------------------------------------------------------
+local Remotes = RS:FindFirstChild("Remotes")
+
+local function GetRemote(path)
+    local cur = Remotes
+    for part in string.gmatch(path, "[^%.]+") do
+        cur = cur and cur:FindFirstChild(part)
+    end
+    if cur then return cur end
+
+    cur = RS
+    for part in string.gmatch(path, "[^%.]+") do
+        cur = cur and cur:FindFirstChild(part)
+    end
+    if cur then return cur end
+
+    local last = path:match("([^%.]+)$")
+    if last then
+        for _, d in ipairs(RS:GetDescendants()) do
+            if d.Name == last then return d end
+        end
+    end
+end
+
+local function FindRemote(name)
+    local r = RS:FindFirstChild(name)
+    if r then return r end
+    if Remotes then
+        r = Remotes:FindFirstChild(name)
+        if r then return r end
+        for _, c in ipairs(Remotes:GetDescendants()) do
+            if c.Name == name then return c end
+        end
+    end
+    for _, c in ipairs(RS:GetDescendants()) do
+        if c.Name == name then return c end
+    end
+end
+
+-- يرجع: ok, ردّ السيرفر
+local function Call(path, ...)
+    local r = GetRemote(path)
+    if not r then return false, "remote not found" end
+    local args = table.pack(...)
+    return pcall(function()
+        if r:IsA("RemoteFunction") then
+            return r:InvokeServer(table.unpack(args, 1, args.n))
+        else
+            r:FireServer(table.unpack(args, 1, args.n))
+        end
+    end)
+end
+
+---------------------------------------------------------
+-- Prompts
+---------------------------------------------------------
+local function PromptPos(p)
+    local par = p.Parent
+    if not par then return end
+    if par:IsA("Attachment") then return par.WorldPosition end
+    if par:IsA("BasePart") then return par.Position end
+    local bp = par:FindFirstChildWhichIsA("BasePart", true)
+    return bp and bp.Position
+end
+
+local function UsePrompt(p)
+    if fireproximityprompt then
+        pcall(fireproximityprompt, p)
+    else
+        pcall(function()
+            p:InputHoldBegin()
+            task.wait(p.HoldDuration + 0.2)
+            p:InputHoldEnd()
+        end)
+    end
+end
+
+---------------------------------------------------------
+-- القاعدة
+---------------------------------------------------------
+local function MyPlot()
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return end
+    for _, p in ipairs(plots:GetChildren()) do
+        local pm = p:FindFirstChild("PlotModel")
+        if pm and pm:GetAttribute("PlotOwnerUserId") == Player.UserId then
+            return p, pm
+        end
+    end
+end
+
+local BaseCFrame, StealCFrame
+local function EnsureBase()
+    if BaseCFrame then return BaseCFrame end
+    local _, pm = MyPlot()
+    local r = GetRoot()
+    if pm then
+        local pos = pm:GetPivot().Position
+        if r and (r.Position - pos).Magnitude < 200 then
+            BaseCFrame = r.CFrame
+        else
+            BaseCFrame = CFrame.new(pos + Vector3.new(0, 5, 0))
+        end
+    elseif r then
+        BaseCFrame = r.CFrame
+    end
+    return BaseCFrame
+end
+
+local function GoBase()
+    local r = GetRoot()
+    if r and EnsureBase() then r.CFrame = BaseCFrame end
+end
+
+local Busy = false
+local function WithBusy(fn)
+    if Busy then return false end
+    Busy = true
+    local ok, e = pcall(fn)
+    Busy = false
+    if not ok then warn("[HAMO] " .. tostring(e)) end
+    return ok
+end
+
+local LastGrab = 0
+local StealDelay = 1.5
+
+---------------------------------------------------------
+-- 🎨 الثيم
+---------------------------------------------------------
+local TH = {
+    bg     = Color3.fromRGB(9, 9, 15),
+    bg2    = Color3.fromRGB(19, 19, 33),
+    card   = Color3.fromRGB(24, 24, 38),
+    cardHi = Color3.fromRGB(35, 35, 56),
+    text   = Color3.fromRGB(236, 236, 248),
+    sub    = Color3.fromRGB(138, 138, 170),
+    on     = Color3.fromRGB(0, 224, 138),
+    off    = Color3.fromRGB(52, 52, 74),
+    red    = Color3.fromRGB(255, 72, 100),
+    violet = Color3.fromRGB(124, 77, 255),
+    cyan   = Color3.fromRGB(0, 229, 255),
+    pink   = Color3.fromRGB(255, 61, 129),
+    gold   = Color3.fromRGB(255, 200, 60),
+}
+
+local C = TH -- توافق مع الكود القديم
+
+local function tw(o, dur, props, style, dir)
+    local t = TweenService:Create(o, TweenInfo.new(dur or 0.18, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props)
+    t:Play()
+    return t
+end
+
+local function Corner(o, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 8)
+    c.Parent = o
+    return c
+end
+
+local function Stroke(o, color, th, trans)
+    local s = Instance.new("UIStroke")
+    s.Color = color or Color3.fromRGB(60, 60, 88)
+    s.Thickness = th or 1
+    s.Transparency = trans or 0
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    s.Parent = o
+    return s
+end
+
+local function Grad(o, c1, c2, rot)
+    local g = Instance.new("UIGradient")
+    g.Color = ColorSequence.new(c1, c2)
+    g.Rotation = rot or 45
+    g.Parent = o
+    return g
+end
+
+-- تدرّج قوس قزح متحرك
+local RainbowSeq
+do
+    local keys = {}
+    for i = 0, 6 do
+        table.insert(keys, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV((i / 6) % 1, 0.75, 1)))
+    end
+    RainbowSeq = ColorSequence.new(keys)
+end
+
+local Gradients = {}
+local function Rainbow(parent)
+    local g = Instance.new("UIGradient")
+    g.Color = RainbowSeq
+    g.Parent = parent
+    table.insert(Gradients, g)
+    return g
+end
+
+do
+    local rot = 0
+    Track(RunService.Heartbeat:Connect(function(dt)
+        rot = (rot + dt * 90) % 360
+        for i = #Gradients, 1, -1 do
+            local g = Gradients[i]
+            if g.Parent then g.Rotation = rot else table.remove(Gradients, i) end
+        end
+    end))
+end
+
+local function MakeDraggable(handle, frame)
+    local dragging, dragStart, startPos
+    Track(handle.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = i.Position
+            startPos = frame.Position
+        end
+    end))
+    Track(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end))
+    Track(UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end))
+end
+
+---------------------------------------------------------
+-- 🏗️ الهيكل الرئيسي
+---------------------------------------------------------
+Step("بناء الواجهة")
+local Hub = Instance.new("ScreenGui")
+Hub.Name = "HamoUltimateHub"
+Hub.ResetOnSpawn = false
+Hub.IgnoreGuiInset = true
+Hub.DisplayOrder = 999
+-- محاولة الإلحاق مع بديل احتياطي (بعض منفّذات الجوال ترفض CoreGui)
+do
+    local target = GuiParent()
+    local ok = false
+    if target then
+        ok = pcall(function() Hub.Parent = target end)
+    end
+    if not ok or not Hub.Parent then
+        local pg = Player:FindFirstChild("PlayerGui") or Player:WaitForChild("PlayerGui", 10)
+        Hub.Parent = pg
+    end
+end
+
+-- 📱 تكييف الحجم مع شاشة الجوال (كان 620×440 يخرج عن الشاشة على الهاتف)
+local UiScaleValue = 1
+do
+    local cam = workspace.CurrentCamera
+    local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+    local s = math.min(1, (vp.X - 24) / 620, (vp.Y - 24) / 440)
+    UiScaleValue = math.max(0.5, s)
+end
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.AnchorPoint = Vector2.new(0.5, 0.5)
+Main.Position = UDim2.new(0.5, 0, 0.5, 0)
+Main.Size = UDim2.new(0, 620, 0, 440)
+Main.BackgroundColor3 = TH.bg
+Main.BorderSizePixel = 0
+Main.ClipsDescendants = false
+Main.Parent = Hub
+Corner(Main, 18)
+Grad(Main, Color3.fromRGB(20, 20, 36), Color3.fromRGB(10, 10, 17), 115)
+
+-- مقياس الواجهة (يعمل على الجوال والشاشات الصغيرة)
+do
+    local us = Instance.new("UIScale")
+    us.Scale = UiScaleValue
+    us.Parent = Main
+end
+
+local MainStroke = Stroke(Main, Color3.new(1, 1, 1), 1.6, 0.15)
+local MainRainbow = Rainbow(MainStroke)
+
+-- هالة خارجية
+local Glow = Instance.new("Frame")
+Glow.Name = "Glow"
+Glow.Position = UDim2.new(0, -14, 0, -14)
+Glow.Size = UDim2.new(1, 28, 1, 28)
+Glow.BackgroundColor3 = Color3.fromRGB(124, 77, 255)
+Glow.BackgroundTransparency = 0.86
+Glow.BorderSizePixel = 0
+Glow.ZIndex = 0
+Glow.Parent = Main
+Corner(Glow, 26)
+Grad(Glow, TH.violet, TH.cyan, 45)
+
+---------------------------------------------------------
+-- الهيدر
+---------------------------------------------------------
+Step("الهيدر")
+local Header = Instance.new("Frame")
+Header.Name = "Header"
+Header.Size = UDim2.new(1, 0, 0, 52)
+Header.BackgroundTransparency = 1
+Header.Parent = Main
+MakeDraggable(Header, Main)
+
+local Logo = Instance.new("Frame")
+Logo.Size = UDim2.new(0, 34, 0, 34)
+Logo.Position = UDim2.new(0, 16, 0, 9)
+Logo.BackgroundColor3 = Color3.new(1, 1, 1)
+Logo.BorderSizePixel = 0
+Logo.Parent = Header
+Corner(Logo, 11)
+Grad(Logo, TH.violet, TH.cyan, 45)
+
+local LogoText = Instance.new("TextLabel")
+LogoText.Size = UDim2.new(1, 0, 1, 0)
+LogoText.BackgroundTransparency = 1
+LogoText.Text = "H"
+LogoText.Font = Enum.Font.GothamBlack
+LogoText.TextSize = 20
+LogoText.TextColor3 = Color3.new(1, 1, 1)
+LogoText.Parent = Logo
+
+local Title = Instance.new("TextLabel")
+Title.BackgroundTransparency = 1
+Title.Position = UDim2.new(0, 58, 0, 6)
+Title.Size = UDim2.new(0, 200, 0, 22)
+Title.Font = Enum.Font.GothamBlack
+Title.Text = "HAMO RBX"
+Title.TextColor3 = Color3.new(1, 1, 1)
+Title.TextSize = 18
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+
+local VerPill = Instance.new("Frame")
+VerPill.Position = UDim2.new(0, 158, 0, 9)
+VerPill.Size = UDim2.new(0, 48, 0, 16)
+VerPill.BackgroundColor3 = TH.violet
+VerPill.BackgroundTransparency = 0.75
+VerPill.BorderSizePixel = 0
+VerPill.Parent = Header
+Corner(VerPill, 8)
+Stroke(VerPill, TH.violet, 1, 0.3)
+
+local VerText = Instance.new("TextLabel")
+VerText.Size = UDim2.new(1, 0, 1, 0)
+VerText.BackgroundTransparency = 1
+VerText.Text = "v27.2"
+VerText.Font = Enum.Font.GothamBold
+VerText.TextSize = 10
+VerText.TextColor3 = TH.cyan
+VerText.Parent = VerPill
+
+local SubTitle = Instance.new("TextLabel")
+SubTitle.BackgroundTransparency = 1
+SubTitle.Position = UDim2.new(0, 58, 0, 27)
+SubTitle.Size = UDim2.new(0, 260, 0, 14)
+SubTitle.Font = Enum.Font.Gotham
+SubTitle.Text = "Anime Pack • Break & Steal • Anti-Hit"
+SubTitle.TextColor3 = TH.sub
+SubTitle.TextSize = 10
+SubTitle.TextXAlignment = Enum.TextXAlignment.Left
+SubTitle.Parent = Header
+
+-- مؤشرات FPS / Ping
+local StatsLbl = Instance.new("TextLabel")
+StatsLbl.BackgroundTransparency = 1
+StatsLbl.Position = UDim2.new(1, -206, 0, 18)
+StatsLbl.Size = UDim2.new(0, 108, 0, 16)
+StatsLbl.Font = Enum.Font.Code
+StatsLbl.Text = "60 FPS  •  0 ms"
+StatsLbl.TextColor3 = TH.sub
+StatsLbl.TextSize = 10
+StatsLbl.TextXAlignment = Enum.TextXAlignment.Right
+StatsLbl.Parent = Header
+
+local function IconBtn(sym, x, col)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 26, 0, 26)
+    b.Position = UDim2.new(1, x, 0, 13)
+    b.BackgroundColor3 = col
+    b.BackgroundTransparency = 0.82
+    b.Text = sym
+    b.TextColor3 = col
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.AutoButtonColor = false
+    b.Parent = Header
+    Corner(b, 8)
+    local st = Stroke(b, col, 1, 0.55)
+    b.MouseEnter:Connect(function()
+        tw(b, 0.15, {BackgroundTransparency = 0.55})
+        tw(st, 0.15, {Transparency = 0.1})
+    end)
+    b.MouseLeave:Connect(function()
+        tw(b, 0.15, {BackgroundTransparency = 0.82})
+        tw(st, 0.15, {Transparency = 0.55})
+    end)
+    return b
+end
+
+local MinBtn   = IconBtn("—", -76, TH.cyan)
+local CloseBtn = IconBtn("✕", -42, TH.red)
+
+-- خط الإضاءة
+local Accent = Instance.new("Frame")
+Accent.Position = UDim2.new(0, 0, 0, 52)
+Accent.Size = UDim2.new(1, 0, 0, 1)
+Accent.BorderSizePixel = 0
+Accent.BackgroundColor3 = Color3.new(1, 1, 1)
+Accent.BackgroundTransparency = 0.55
+Accent.Parent = Main
+Rainbow(Accent)
+
+---------------------------------------------------------
+-- الشريط الجانبي
+---------------------------------------------------------
+Step("الشريط الجانبي")
+local Sidebar = Instance.new("Frame")
+Sidebar.Position = UDim2.new(0, 12, 0, 62)
+Sidebar.Size = UDim2.new(0, 152, 1, -100)
+Sidebar.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+Sidebar.BackgroundTransparency = 0.96
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = Main
+Corner(Sidebar, 12)
+Stroke(Sidebar, Color3.fromRGB(70, 70, 100), 1, 0.6)
+do
+    local l = Instance.new("UIListLayout")
+    l.Padding = UDim.new(0, 4)
+    l.SortOrder = Enum.SortOrder.LayoutOrder
+    l.Parent = Sidebar
+    local pd = Instance.new("UIPadding")
+    pd.PaddingTop = UDim.new(0, 8)
+    pd.PaddingLeft = UDim.new(0, 8)
+    pd.PaddingRight = UDim.new(0, 8)
+    pd.Parent = Sidebar
+end
+
+Step("المحتوى")
+local Content = Instance.new("Frame")
+Content.Position = UDim2.new(0, 176, 0, 62)
+Content.Size = UDim2.new(1, -188, 1, -100)
+Content.BackgroundTransparency = 1
+Content.Parent = Main
+
+---------------------------------------------------------
+-- الفوتر
+---------------------------------------------------------
+local Footer = Instance.new("Frame")
+Footer.Position = UDim2.new(0, 12, 1, -32)
+Footer.Size = UDim2.new(1, -24, 0, 22)
+Footer.BackgroundTransparency = 1
+Footer.Parent = Main
+
+local FootDot = Instance.new("Frame")
+FootDot.Size = UDim2.new(0, 6, 0, 6)
+FootDot.Position = UDim2.new(0, 4, 0.5, -3)
+FootDot.BackgroundColor3 = TH.on
+FootDot.BorderSizePixel = 0
+FootDot.Parent = Footer
+Corner(FootDot, 3)
+
+local FootLbl = Instance.new("TextLabel")
+FootLbl.BackgroundTransparency = 1
+FootLbl.Position = UDim2.new(0, 16, 0, 0)
+FootLbl.Size = UDim2.new(0, 300, 1, 0)
+FootLbl.Font = Enum.Font.Gotham
+FootLbl.Text = "متصل • HAMO v27.2"
+FootLbl.TextColor3 = TH.sub
+FootLbl.TextSize = 10
+FootLbl.TextXAlignment = Enum.TextXAlignment.Left
+FootLbl.Parent = Footer
+
+local HintLbl = Instance.new("TextLabel")
+HintLbl.BackgroundTransparency = 1
+HintLbl.Position = UDim2.new(1, -220, 0, 0)
+HintLbl.Size = UDim2.new(0, 216, 1, 0)
+HintLbl.Font = Enum.Font.Code
+HintLbl.Text = "زر H العائم / RightShift"
+HintLbl.TextColor3 = Color3.fromRGB(90, 90, 120)
+HintLbl.TextSize = 10
+HintLbl.TextXAlignment = Enum.TextXAlignment.Right
+HintLbl.Parent = Footer
+
+---------------------------------------------------------
+-- 🔔 التنبيهات
+---------------------------------------------------------
+Step("التنبيهات")
+local ToastHolder = Instance.new("Frame")
+ToastHolder.Position = UDim2.new(1, -330, 0, 16)
+ToastHolder.Size = UDim2.new(0, 310, 0, 400)
+ToastHolder.BackgroundTransparency = 1
+ToastHolder.Parent = Hub
+do
+    local l = Instance.new("UIListLayout")
+    l.Padding = UDim.new(0, 8)
+    l.HorizontalAlignment = Enum.HorizontalAlignment.Right
+    l.Parent = ToastHolder
+end
+
+local function Notify(title, text, color)
+    color = color or TH.violet
+    local cg = Instance.new("CanvasGroup")
+    cg.Size = UDim2.new(1, 0, 0, 52)
+    cg.BackgroundColor3 = Color3.fromRGB(22, 22, 36)
+    cg.BackgroundTransparency = 0.05
+    cg.GroupTransparency = 1
+    cg.BorderSizePixel = 0
+    cg.Parent = ToastHolder
+    Corner(cg, 12)
+    Stroke(cg, color, 1.2, 0.35)
+
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.new(0, 3, 1, -16)
+    bar.Position = UDim2.new(0, 8, 0, 8)
+    bar.BackgroundColor3 = color
+    bar.BorderSizePixel = 0
+    bar.Parent = cg
+    Corner(bar, 2)
+
+    local t1 = Instance.new("TextLabel")
+    t1.BackgroundTransparency = 1
+    t1.Position = UDim2.new(0, 20, 0, 8)
+    t1.Size = UDim2.new(1, -28, 0, 16)
+    t1.Font = Enum.Font.GothamBold
+    t1.Text = title
+    t1.TextColor3 = TH.text
+    t1.TextSize = 12
+    t1.TextXAlignment = Enum.TextXAlignment.Left
+    t1.Parent = cg
+
+    local t2 = Instance.new("TextLabel")
+    t2.BackgroundTransparency = 1
+    t2.Position = UDim2.new(0, 20, 0, 26)
+    t2.Size = UDim2.new(1, -28, 0, 16)
+    t2.Font = Enum.Font.Gotham
+    t2.Text = text
+    t2.TextColor3 = TH.sub
+    t2.TextSize = 10
+    t2.TextXAlignment = Enum.TextXAlignment.Left
+    t2.TextTruncate = Enum.TextTruncate.AtEnd
+    t2.Parent = cg
+
+    tw(cg, 0.25, {GroupTransparency = 0})
+    task.delay(3.2, function()
+        if cg.Parent then
+            tw(cg, 0.3, {GroupTransparency = 1})
+            task.wait(0.35)
+            cg:Destroy()
+        end
+    end)
+end
+
+---------------------------------------------------------
+-- 🧩 مكوّنات الواجهة
+---------------------------------------------------------
+local Pages, TabBtns = {}, {}
+local PageOrder = setmetatable({}, {__mode = "k"})
+
+local function nextOrder(page)
+    PageOrder[page] = (PageOrder[page] or 0) + 1
+    return PageOrder[page]
+end
+
+local function CreateTab(text)
+    local page = Instance.new("ScrollingFrame")
+    page.Size = UDim2.new(1, 0, 1, 0)
+    page.Position = UDim2.new(0, 0, 0, 0)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = 3
+    page.ScrollBarImageColor3 = TH.violet
+    page.ScrollBarImageTransparency = 0.4
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.CanvasSize = UDim2.new()
+    page.Visible = false
+    page.Parent = Content
+    local l = Instance.new("UIListLayout")
+    l.Padding = UDim.new(0, 7)
+    l.SortOrder = Enum.SortOrder.LayoutOrder
+    l.Parent = page
+    local pd = Instance.new("UIPadding")
+    pd.PaddingRight = UDim.new(0, 6)
+    pd.Parent = page
+
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, 0, 0, 38)
+    b.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    b.BackgroundTransparency = 0.97
+    b.Text = "  " .. text
+    b.TextColor3 = TH.sub
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 11
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    b.AutoButtonColor = false
+    b.Parent = Sidebar
+    Corner(b, 9)
+
+    local ind = Instance.new("Frame")
+    ind.Size = UDim2.new(0, 3, 0, 0)
+    ind.Position = UDim2.new(0, 0, 0.5, 0)
+    ind.AnchorPoint = Vector2.new(0, 0.5)
+    ind.BackgroundColor3 = Color3.new(1, 1, 1)
+    ind.BorderSizePixel = 0
+    ind.Visible = false
+    ind.Parent = b
+    Corner(ind, 2)
+    Grad(ind, TH.violet, TH.cyan, 90)
+
+    table.insert(Pages, page)
+    table.insert(TabBtns, b)
+
+    local function activate()
+        for i, p in ipairs(Pages) do
+            p.Visible = false
+            TabBtns[i].BackgroundTransparency = 0.97
+            TabBtns[i].TextColor3 = TH.sub
+            local child = TabBtns[i]:FindFirstChildOfClass("Frame")
+            if child then child.Visible = false end
+        end
+        page.Visible = true
+        page.Position = UDim2.new(0, 14, 0, 0)
+        tw(page, 0.22, {Position = UDim2.new(0, 0, 0, 0)})
+        b.BackgroundTransparency = 0.88
+        b.TextColor3 = TH.text
+        ind.Visible = true
+        tw(ind, 0.2, {Size = UDim2.new(0, 3, 0, 20)})
+    end
+
+    b.MouseButton1Click:Connect(activate)
+    b.MouseEnter:Connect(function()
+        if page.Visible then return end
+        tw(b, 0.15, {BackgroundTransparency = 0.93})
+    end)
+    b.MouseLeave:Connect(function()
+        if page.Visible then return end
+        tw(b, 0.15, {BackgroundTransparency = 0.97})
+    end)
+
+    return page, activate
+end
+
+local function Section(page, text)
+    local wrap = Instance.new("Frame")
+    wrap.Size = UDim2.new(1, -4, 0, 24)
+    wrap.BackgroundTransparency = 1
+    wrap.LayoutOrder = nextOrder(page)
+    wrap.Parent = page
+
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.new(0, 3, 0, 12)
+    bar.Position = UDim2.new(0, 2, 0.5, -6)
+    bar.BackgroundColor3 = Color3.new(1, 1, 1)
+    bar.BorderSizePixel = 0
+    bar.Parent = wrap
+    Corner(bar, 2)
+    Grad(bar, TH.violet, TH.cyan, 90)
+
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Position = UDim2.new(0, 12, 0, 0)
+    l.Size = UDim2.new(1, -16, 1, 0)
+    l.Text = text
+    l.TextColor3 = TH.gold
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = 11
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = wrap
+    return l
+end
+
+local function AddToggle(page, text, key, onChange)
+    State[key] = false
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -4, 0, 40)
+    b.BackgroundColor3 = TH.card
+    b.BackgroundTransparency = 0.08
+    b.Text = ""
+    b.AutoButtonColor = false
+    b.LayoutOrder = nextOrder(page)
+    b.Parent = page
+    Corner(b, 10)
+    local st = Stroke(b, Color3.fromRGB(70, 70, 100), 1, 0.65)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency = 1
+    lbl.Position = UDim2.new(0, 14, 0, 0)
+    lbl.Size = UDim2.new(1, -76, 1, 0)
+    lbl.Text = text
+    lbl.TextColor3 = TH.text
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 11
+    lbl.TextWrapped = true
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = b
+
+    local pill = Instance.new("Frame")
+    pill.Size = UDim2.new(0, 42, 0, 22)
+    pill.Position = UDim2.new(1, -56, 0.5, -11)
+    pill.BackgroundColor3 = TH.off
+    pill.Parent = b
+    Corner(pill, 11)
+    local pst = Stroke(pill, TH.off, 1, 0.5)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 18, 0, 18)
+    knob.Position = UDim2.new(0, 2, 0.5, -9)
+    knob.BackgroundColor3 = Color3.new(1, 1, 1)
+    knob.Parent = pill
+    Corner(knob, 9)
+
+    b.MouseEnter:Connect(function() tw(st, 0.15, {Transparency = 0.25}) end)
+    b.MouseLeave:Connect(function() tw(st, 0.15, {Transparency = 0.65}) end)
+
+    b.MouseButton1Click:Connect(function()
+        local v = not State[key]
+        State[key] = v
+        tw(pill, 0.18, {BackgroundColor3 = v and TH.on or TH.off})
+        tw(pst, 0.18, {Color = v and TH.on or TH.off, Transparency = v and 0 or 0.5})
+        tw(knob, 0.18, {Position = v and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)}, Enum.EasingStyle.Back)
+        tw(b, 0.18, {BackgroundColor3 = v and Color3.fromRGB(28, 34, 46) or TH.card})
+        if onChange then
+            local ok, e = pcall(onChange, v)
+            if not ok then warn("[HAMO:" .. key .. "] " .. tostring(e)) end
+        end
+    end)
+end
+
+local function AddButton(page, text, color, callback)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -4, 0, 38)
+    b.BackgroundColor3 = color or TH.card
+    b.BackgroundTransparency = color and 0.15 or 0.05
+    b.Text = text
+    b.TextColor3 = TH.text
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 11
+    b.AutoButtonColor = false
+    b.LayoutOrder = nextOrder(page)
+    b.Parent = page
+    Corner(b, 10)
+    local st = Stroke(b, color or TH.violet, 1, color and 0.35 or 0.7)
+
+    b.MouseEnter:Connect(function()
+        tw(b, 0.15, {BackgroundTransparency = color and 0 or 0.0})
+        tw(st, 0.15, {Transparency = 0.15})
+    end)
+    b.MouseLeave:Connect(function()
+        tw(b, 0.15, {BackgroundTransparency = color and 0.15 or 0.05})
+        tw(st, 0.15, {Transparency = color and 0.35 or 0.7})
+    end)
+
+    b.MouseButton1Click:Connect(function()
+        local ok, e = pcall(callback, b)
+        if not ok then warn("[HAMO] " .. tostring(e)) end
+    end)
+    return b
+end
+
+local function AddStepper(page, text, min, max, step, default, onChange)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, -4, 0, 40)
+    f.BackgroundColor3 = TH.card
+    f.BackgroundTransparency = 0.08
+    f.LayoutOrder = nextOrder(page)
+    f.Parent = page
+    Corner(f, 10)
+    Stroke(f, Color3.fromRGB(70, 70, 100), 1, 0.65)
+
+    local val = default
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency = 1
+    lbl.Position = UDim2.new(0, 14, 0, 0)
+    lbl.Size = UDim2.new(1, -104, 1, 0)
+    lbl.Text = text .. ": " .. val
+    lbl.TextColor3 = TH.text
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 11
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = f
+
+    local function mk(sym, x, d)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, 26, 0, 24)
+        b.Position = UDim2.new(1, x, 0.5, -12)
+        b.BackgroundColor3 = TH.cardHi
+        b.Text = sym
+        b.TextColor3 = TH.text
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 14
+        b.AutoButtonColor = false
+        b.Parent = f
+        Corner(b, 7)
+        Stroke(b, TH.violet, 1, 0.7)
+        b.MouseEnter:Connect(function() tw(b, 0.12, {BackgroundColor3 = TH.violet}) end)
+        b.MouseLeave:Connect(function() tw(b, 0.12, {BackgroundColor3 = TH.cardHi}) end)
+        b.MouseButton1Click:Connect(function()
+            val = math.clamp(val + d * step, min, max)
+            lbl.Text = text .. ": " .. val
+            onChange(val)
+        end)
+    end
+    mk("−", -68, -1)
+    mk("+", -36, 1)
+    onChange(val)
+end
+
+---------------------------------------------------------
+-- التبويبات
+---------------------------------------------------------
+Step("تبويب Anime Pack")
+local AnimePage = CreateTab("🎌 Anime Pack")
+Step("تبويب المرح")
+local FunPage   = CreateTab("😂 المرح")
+Step("تبويب الانتقال")
+local TpPage    = CreateTab("🌀 الانتقال")
+Step("تبويب الحركة")
+local MovePage  = CreateTab("⚡ الحركة")
+Step("تبويب الأدوات")
+local ToolsPage = CreateTab("🔧 الأدوات")
+Step("تبويب الحماية")
+local SafePage  = CreateTab("🛡️ الحماية")
+
+---------------------------------------------------------
+-- 🎌 Anime Pack
+---------------------------------------------------------
+do
+    local P = AnimePage
+    local Cooldown = {}
+    local RARITIES = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythical", "Cosmic", "Divine", "Omniversal"}
+    local RANK = {}
+    for i, n in ipairs(RARITIES) do RANK[lower(n)] = i end
+    local Chosen = {}
+    for _, n in ipairs(RARITIES) do Chosen[lower(n)] = true end
+    local StatusLbl, PlaceLbl
+    local Warned = {}
+
+    local function SetPlace(t) if PlaceLbl then PlaceLbl.Text = t end end
+
+    local function Brief(v)
+        if typeof(v) == "table" then
+            local out, n = {}, 0
+            for k, x in pairs(v) do
+                n += 1
+                if n > 4 then break end
+                table.insert(out, tostring(k) .. "=" .. tostring(x))
+            end
+            return "{" .. table.concat(out, ",") .. "}"
+        end
+        return tostring(v)
+    end
+
+    local function ParseWeight(p)
+        local d = p:GetAttribute("DetailText") or ""
+        return tonumber(string.match(d, "%[([%d%.]+)%s*[kK][gG]%]")) or 0
+    end
+
+    local function RarityOf(p)
+        return lower((tostring(p:GetAttribute("DetailRarity") or ""):gsub("%s+", "")))
+    end
+
+    local function StageOf(p)
+        local cur = p
+        while cur and cur.Name ~= "SpawnedPacks" do cur = cur.Parent end
+        return cur and cur.Parent and cur.Parent.Name or "?"
+    end
+
+    local function PackNameOf(p)
+        local m = p.Parent and p.Parent.Parent and p.Parent.Parent.Parent
+        return m and m.Name or "?"
+    end
+
+    local function FindChosen()
+        local list = {}
+        local game_ = workspace:FindFirstChild("Game")
+        local packs = game_ and game_:FindFirstChild("Packs")
+        if not packs then return list end
+        local r = GetRoot()
+        for _, p in ipairs(packs:GetDescendants()) do
+            if p:IsA("ProximityPrompt") and p.Name == "StealPrompt" and p.Enabled
+                and (Cooldown[p] or 0) < os.clock() then
+                local rar = RarityOf(p)
+                local rank = RANK[rar]
+                if not rank and rar ~= "" and not Warned[rar] then
+                    Warned[rar] = true
+                    warn("[HAMO] ندرة غير معروفة: " .. rar)
+                end
+                if rank and Chosen[rar] then
+                    local pos = PromptPos(p)
+                    if pos then
+                        table.insert(list, {p = p, pos = pos, rank = rank, w = ParseWeight(p), d = r and (pos - r.Position).Magnitude or 0})
+                    end
+                end
+            end
+        end
+        table.sort(list, function(a, b)
+            if a.rank ~= b.rank then return a.rank > b.rank end
+            if a.w ~= b.w then return a.w > b.w end
+            return a.d < b.d
+        end)
+        return list
+    end
+
+    local function TrySteal(item)
+        local r = GetRoot()
+        if not r then return false end
+        r.CFrame = CFrame.new(item.pos + Vector3.new(0, 3, 0))
+        task.wait(0.25)
+        local before = LastGrab
+        UsePrompt(item.p)
+        local t = os.clock()
+        while os.clock() - t < 1.2 and LastGrab == before do task.wait(0.05) end
+        if LastGrab == before then
+            pcall(function()
+                item.p:InputHoldBegin()
+                task.wait(item.p.HoldDuration + 0.2)
+                item.p:InputHoldEnd()
+            end)
+            t = os.clock()
+            while os.clock() - t < 1 and LastGrab == before do task.wait(0.05) end
+        end
+        local ok = LastGrab ~= before
+        Cooldown[item.p] = os.clock() + (ok and 3 or 8)
+        return ok
+    end
+
+    local Seen = setmetatable({}, {__mode = "k"})
+    local Pending = setmetatable({}, {__mode = "k"})
+
+    local function ToolSet()
+        local s = {}
+        local bp = Player:FindFirstChildOfClass("Backpack")
+        if bp then
+            for _, t in ipairs(bp:GetChildren()) do
+                if t:IsA("Tool") and t:GetAttribute("PackId") then s[t] = true end
+            end
+        end
+        local ch = Player.Character
+        if ch then
+            for _, t in ipairs(ch:GetChildren()) do
+                if t:IsA("Tool") and t:GetAttribute("PackId") then s[t] = true end
+            end
+        end
+        return s
+    end
+
+    for t in pairs(ToolSet()) do Seen[t] = true end
+    task.spawn(function()
+        while Alive do
+            for t in pairs(ToolSet()) do
+                if not Seen[t] then
+                    Seen[t] = true
+                    Pending[t] = os.clock()
+                end
+            end
+            task.wait(0.25)
+        end
+    end)
+
+    local PLACE_OFFSETS = {}
+    for _, rad in ipairs({4, 6, 8, 10, 12}) do
+        for i = 0, 7 do
+            local a = i * math.pi / 4 + rad * 0.3
+            table.insert(PLACE_OFFSETS, Vector3.new(math.cos(a) * rad, 0, math.sin(a) * rad))
+        end
+    end
+    local PlaceCursor = 0
+
+    local function PlacedCount()
+        local _, pm = MyPlot()
+        local pp = pm and pm:FindFirstChild("PlacedPacks")
+        return pp and #pp:GetChildren() or 0
+    end
+
+    local function Consumed(tool)
+        if not tool.Parent then return true end
+        if tool:IsDescendantOf(Player) then return false end
+        if Player.Character and tool:IsDescendantOf(Player.Character) then return false end
+        return true
+    end
+
+    local function PlaceTool(tool)
+        local id = tool:GetAttribute("PackId")
+        if not id then return false, "no PackId" end
+
+        Call("Tools.RequestEquip", {Tool = tool, Equipped = true})
+        local t0 = os.clock()
+        while os.clock() - t0 < 1 and Player.Character and tool.Parent ~= Player.Character do
+            task.wait(0.05)
+        end
+        if tool.Parent ~= Player.Character then
+            local h = GetHum()
+            if h then pcall(function() h:EquipTool(tool) end) end
+            task.wait(0.2)
+        end
+
+        local root = GetRoot()
+        if not root then return false, "no root" end
+        local base = root.Position
+        local y = base.Y - 3.3
+        local before = PlacedCount()
+        local lastRes = "-"
+
+        for _ = 1, 24 do
+            if not Alive then return false, lastRes end
+            PlaceCursor = PlaceCursor % #PLACE_OFFSETS + 1
+            local o = PLACE_OFFSETS[PlaceCursor]
+            local _, res = Call("Packs.PlaceOwned", {
+                Position = Vector3.new(base.X + o.X, y, base.Z + o.Z),
+                PackId = id,
+            })
+            lastRes = Brief(res)
+            task.wait(0.3)
+            if Consumed(tool) or PlacedCount() > before then
+                return true, lastRes
+            end
+        end
+        return false, lastRes
+    end
+
+    local function PostSteal(g)
+        SetPlace("⏳ انتظار " .. StealDelay .. " ثانية...")
+        task.wait(StealDelay)
+        GoBase()
+        task.wait(0.5)
+
+        -- تفريغ Pending دائماً (إصلاح التسريب)
+        local list = {}
+        for t, tm in pairs(Pending) do
+            if tm >= g - 2.5 and t.Parent then table.insert(list, t) end
+            Pending[t] = nil
+        end
+
+        if not State.autoplace then return end
+        if #list == 0 then
+            SetPlace("لم أجد حقيبة جديدة لوضعها")
+            return
+        end
+        for _, t in ipairs(list) do
+            if not Alive then break end
+            local name = t.Name
+            local ok, info = PlaceTool(t)
+            SetPlace((ok and "✅ وُضعت: " or "❌ فشل وضع: ") .. name .. " | رد: " .. info)
+        end
+    end
+
+    do
+        local grab = GetRemote("FX.PackGrab")
+        if grab and grab:IsA("RemoteEvent") then
+            Track(grab.OnClientEvent:Connect(function(data)
+                if type(data) == "table" and typeof(data.Root) == "Instance"
+                    and Player.Character and data.Root:IsDescendantOf(Player.Character) then
+                    LastGrab = os.clock()
+                    if State.steal and not Busy then
+                        local g = LastGrab
+                        task.spawn(function()
+                            WithBusy(function() PostSteal(g) end)
+                        end)
+                    end
+                end
+            end))
+        end
+    end
+
+    local function ReadyHatcheries()
+        local out = {}
+        local _, pm = MyPlot()
+        local placed = pm and pm:FindFirstChild("PlacedPacks")
+        if not placed then return out end
+        local now = workspace:GetServerTimeNow()
+        for _, m in ipairs(placed:GetChildren()) do
+            local id = m:GetAttribute("PackId")
+            local ends = m:GetAttribute("HatcheryEndsAt")
+            if id and m:GetAttribute("IsHatchery") and ends and now >= ends then
+                table.insert(out, id)
+            end
+        end
+        return out
+    end
+
+    Section(P, "السرقة")
+
+    AddToggle(P, "🤝 بعد سرقتي اليدوية: انتظر ثم ارجع للقاعدة", "steal", function(v)
+        if v then EnsureBase() end
+    end)
+
+    AddToggle(P, "🤖 سرقة تلقائية (الندرات المختارة فقط)", "autosteal", function(v)
+        if not v then
+            if StatusLbl then StatusLbl.Text = "الحالة: متوقفة" end
+            return
+        end
+        EnsureBase()
+        Loop("autosteal", 0.3, function()
+            if Busy or not GetRoot() then return end
+            local any = false
+            for _, on in pairs(Chosen) do if on then any = true break end end
+            if not any then
+                if StatusLbl then StatusLbl.Text = "⚠️ اختر ندرة واحدة على الأقل" end
+                return
+            end
+            local best = FindChosen()[1]
+            if not best then
+                if StatusLbl then StatusLbl.Text = "🔎 لا توجد حقيبة بالندرات المختارة الآن" end
+                return
+            end
+            if StatusLbl then
+                StatusLbl.Text = string.format("🎯 %s | %s | %s | %skg", StageOf(best.p), PackNameOf(best.p), RARITIES[best.rank], best.w)
+            end
+            WithBusy(function()
+                if TrySteal(best) then
+                    PostSteal(LastGrab)
+                else
+                    task.wait(0.3)
+                    GoBase()
+                end
+            end)
+            task.wait(0.5)
+        end)
+    end)
+
+    AddStepper(P, "الانتظار بعد السرقة (ثانية)", 0.5, 5, 0.5, 1.5, function(v) StealDelay = v end)
+
+    StatusLbl = Section(P, "الحالة: متوقفة")
+    StatusLbl.TextColor3 = TH.on
+    StatusLbl.TextSize = 10
+
+    Section(P, "اختر الندرات التي تريد سرقتها")
+
+    local chipColors = {
+        common = Color3.fromRGB(150, 150, 160), uncommon = Color3.fromRGB(90, 200, 110),
+        rare = Color3.fromRGB(70, 150, 255), epic = Color3.fromRGB(170, 90, 255),
+        legendary = Color3.fromRGB(255, 170, 40), mythical = Color3.fromRGB(255, 80, 120),
+        cosmic = Color3.fromRGB(60, 220, 230), divine = Color3.fromRGB(255, 235, 120),
+        omniversal = Color3.fromRGB(255, 90, 90),
+    }
+    local grid = Instance.new("Frame")
+    grid.Size = UDim2.new(1, -4, 0, 0)
+    grid.AutomaticSize = Enum.AutomaticSize.Y
+    grid.BackgroundTransparency = 1
+    grid.LayoutOrder = nextOrder(P)
+    grid.Parent = P
+    do
+        local g = Instance.new("UIGridLayout")
+        g.CellSize = UDim2.new(0.32, 0, 0, 30)
+        g.CellPadding = UDim2.new(0.02, 0, 0, 6)
+        g.SortOrder = Enum.SortOrder.LayoutOrder
+        g.Parent = grid
+    end
+    for i, name in ipairs(RARITIES) do
+        local key = lower(name)
+        local col = chipColors[key]
+        local b = Instance.new("TextButton")
+        b.LayoutOrder = i
+        b.Text = name
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 10
+        b.AutoButtonColor = false
+        b.Parent = grid
+        Corner(b, 9)
+        Stroke(b, col, 1.4, 0.35)
+        local function paint()
+            if Chosen[key] then
+                b.BackgroundColor3 = col
+                b.TextColor3 = Color3.fromRGB(10, 10, 14)
+            else
+                b.BackgroundColor3 = TH.card
+                b.TextColor3 = col
+            end
+        end
+        paint()
+        b.MouseButton1Click:Connect(function()
+            Chosen[key] = not Chosen[key]
+            paint()
+        end)
+    end
+
+    local function SetAll(v)
+        for _, n in ipairs(RARITIES) do Chosen[lower(n)] = v end
+        for _, c in ipairs(grid:GetChildren()) do
+            if c:IsA("TextButton") then
+                local col = chipColors[lower(c.Text)]
+                c.BackgroundColor3 = v and col or TH.card
+                c.TextColor3 = v and Color3.fromRGB(10, 10, 14) or col
+            end
+        end
+    end
+    AddButton(P, "✅ تحديد الكل", nil, function() SetAll(true) end)
+    AddButton(P, "⬜ إلغاء الكل", nil, function() SetAll(false) end)
+
+    Section(P, "القاعدة")
+
+    AddToggle(P, "📥 وضع الحقيبة المسروقة في القاعدة بعد كل سرقة", "autoplace")
+
+    PlaceLbl = Section(P, "حالة الوضع: -")
+    PlaceLbl.TextColor3 = TH.on
+    PlaceLbl.TextSize = 10
+    PlaceLbl.TextWrapped = true
+
+    AddButton(P, "🧪 اختبار الوضع: ضع حقيبة واحدة معي الآن", nil, function()
+        WithBusy(function()
+            local pick
+            for t in pairs(ToolSet()) do
+                if t:GetAttribute("CardIsPack") then pick = t break end
+                pick = pick or t
+            end
+            if not pick then
+                SetPlace("❌ لا توجد حقيبة معك")
+                return
+            end
+            GoBase()
+            task.wait(0.5)
+            local name = pick.Name
+            local ok, info = PlaceTool(pick)
+            SetPlace((ok and "✅ وُضعت: " or "❌ فشل وضع: ") .. name .. " | رد: " .. info)
+        end)
+    end)
+
+    AddToggle(P, "📦 فتح الحقائب الجاهزة تلقائياً", "autoopen", function(v)
+        if not v then return end
+        Loop("autoopen", 3, function()
+            for _, id in ipairs(ReadyHatcheries()) do
+                if not State.autoopen then return end
+                Call("Packs.OpenOwned", id)
+                task.wait(0.5)
+            end
+        end)
+    end)
+
+    Section(P, "أخرى")
+
+    AddToggle(P, "🎁 جمع المكافآت (يومي / هدية / أوفلاين)", "claim", function(v)
+        if not v then return end
+        Loop("claim", 20, function()
+            Call("Daily.Claim")
+            Call("FreeGift.Claim")
+            Call("Offline.Claim")
+            local plot = MyPlot()
+            if plot then
+                for _, d in ipairs(plot:GetDescendants()) do
+                    if d:IsA("ProximityPrompt") and d.Name == "FreeGiftProxy" and d.Enabled then
+                        UsePrompt(d)
+                    end
+                end
+            end
+        end)
+    end)
+
+    AddToggle(P, "🏃 ترقية المشاية تلقائياً", "treadmill", function(v)
+        if not v then return end
+        Loop("treadmill", 5, function()
+            local plot = MyPlot()
+            local tm = plot and plot:FindFirstChild("Treadmil")
+            local up = tm and tm:FindFirstChild("TreadmillUpgrade")
+            local prompt = up and up:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if not prompt then return end
+            if prompt.Enabled then
+                UsePrompt(prompt)
+            elseif not Busy then
+                WithBusy(function()
+                    local r = GetRoot()
+                    local pos = PromptPos(prompt)
+                    if not (r and pos) then return end
+                    local back = r.CFrame
+                    r.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+                    task.wait(0.4)
+                    if prompt.Enabled then UsePrompt(prompt) end
+                    task.wait(0.2)
+                    local r2 = GetRoot()
+                    if r2 then r2.CFrame = back end
+                end)
+            end
+        end)
+    end)
+
+    AddToggle(P, "🏅 تجهيز أفضل الحقائب تلقائياً", "equipbest", function(v)
+        if v then Loop("equipbest", 10, function() Call("Packs.EquipBest", {}) end) end
+    end)
+
+    AddButton(P, "📍 تحديث القاعدة (حفظ موقعي الحالي)", nil, function(b)
+        local r = GetRoot()
+        if r then
+            BaseCFrame = r.CFrame
+            b.Text = "✅ تم الحفظ"
+            Notify("القاعدة", "تم حفظ موقع القاعدة", TH.on)
+            task.wait(1.2)
+            b.Text = "📍 تحديث القاعدة (حفظ موقعي الحالي)"
+        end
+    end)
+end
+
+---------------------------------------------------------
+-- 😂 المرح
+---------------------------------------------------------
+do
+    local P = FunPage
+    local DANCES = {"rbxassetid://507771019", "rbxassetid://507776043", "rbxassetid://507777268"}
+    local DanceIdx, Target, funConn, funTrack, funAngle = 1, nil, nil, nil, 0
+    local GroupTracks = {}
+    local StatusLabel
+    local MODE = {shadow = "👤 الظل", orbit = "🛰️ الدوران", rider = "🎒 الراكب", chase = "🏃 المطاردة"}
+
+    local function SetStatus(t) if StatusLabel then StatusLabel.Text = t end end
+
+    local function StopAnim()
+        if funTrack then pcall(function() funTrack:Stop() end) funTrack = nil end
+    end
+
+    local function PlayAnim(id)
+        StopAnim()
+        local h = GetHum()
+        if not h then return end
+        local animator = h:FindFirstChildOfClass("Animator") or Instance.new("Animator", h)
+        local a = Instance.new("Animation")
+        a.AnimationId = id
+        funTrack = animator:LoadAnimation(a)
+        funTrack.Looped = true
+        funTrack:Play()
+    end
+
+    local function StopFun()
+        Shared.FunMode = nil
+        if funConn then funConn:Disconnect() funConn = nil end
+        StopAnim()
+        local h = GetHum()
+        if h then
+            if not State.speed then h.WalkSpeed = 16 end
+            h:Move(Vector3.zero)
+        end
+        SetStatus(Target and ("الهدف: " .. Target.Name .. " | متوقف") or "الهدف: لم يتم الاختيار")
+    end
+    table.insert(Cleanups, StopFun)
+
+    local function TargetRoot()
+        if Target and Target.Parent and Target.Character then
+            return Target.Character:FindFirstChild("HumanoidRootPart")
+        end
+    end
+
+    local function StartFun(mode)
+        if not (Target and TargetRoot()) then
+            SetStatus("⚠️ اختر لاعباً من القائمة أولاً")
+            return
+        end
+        StopFun()
+        Shared.FunMode = mode
+        funAngle = 0
+        if mode == "shadow" then PlayAnim(DANCES[DanceIdx]) end
+        SetStatus("الهدف: " .. Target.Name .. " | " .. MODE[mode])
+
+        funConn = RunService.Heartbeat:Connect(function(dt)
+            local root, hum, tr = GetRoot(), GetHum(), TargetRoot()
+            if not (root and hum and tr) then StopFun() return end
+            if mode == "shadow" then
+                local goal = (tr.CFrame * CFrame.new(0, 0, 3.5)).Position
+                local cf = CFrame.lookAt(goal, Vector3.new(tr.Position.X, goal.Y, tr.Position.Z))
+                root.CFrame = root.CFrame:Lerp(cf, 0.2)
+            elseif mode == "orbit" then
+                funAngle = funAngle + dt * 4
+                local pos = tr.Position + Vector3.new(math.cos(funAngle) * 5, 0, math.sin(funAngle) * 5)
+                root.CFrame = CFrame.lookAt(pos, Vector3.new(tr.Position.X, pos.Y, tr.Position.Z))
+            elseif mode == "rider" then
+                root.CFrame = tr.CFrame * CFrame.new(0, 1.6, 0.6)
+                root.AssemblyLinearVelocity = Vector3.zero
+            elseif mode == "chase" then
+                hum.WalkSpeed = 32
+                hum:MoveTo(tr.Position)
+            end
+        end)
+    end
+
+    Section(P, "اختر الصديق")
+    StatusLabel = Section(P, "الهدف: لم يتم الاختيار")
+    StatusLabel.TextColor3 = TH.on
+
+    local PlayerList = Instance.new("ScrollingFrame")
+    PlayerList.Size = UDim2.new(1, -4, 0, 110)
+    PlayerList.BackgroundColor3 = Color3.fromRGB(16, 16, 26)
+    PlayerList.BackgroundTransparency = 0.15
+    PlayerList.BorderSizePixel = 0
+    PlayerList.ScrollBarThickness = 3
+    PlayerList.ScrollBarImageColor3 = TH.violet
+    PlayerList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    PlayerList.CanvasSize = UDim2.new()
+    PlayerList.LayoutOrder = nextOrder(P)
+    PlayerList.Parent = P
+    Corner(PlayerList, 10)
+    Stroke(PlayerList, Color3.fromRGB(70, 70, 100), 1, 0.7)
+    do
+        local l = Instance.new("UIListLayout")
+        l.Padding = UDim.new(0, 3)
+        l.Parent = PlayerList
+        local pd = Instance.new("UIPadding")
+        pd.PaddingTop = UDim.new(0, 5)
+        pd.PaddingLeft = UDim.new(0, 5)
+        pd.PaddingRight = UDim.new(0, 5)
+        pd.Parent = PlayerList
+    end
+
+    local function BuildList()
+        for _, c in ipairs(PlayerList:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= Player then
+                local b = Instance.new("TextButton")
+                b.Size = UDim2.new(1, -6, 0, 26)
+                b.BackgroundColor3 = (Target == p) and TH.violet or Color3.fromRGB(26, 26, 40)
+                b.BackgroundTransparency = (Target == p) and 0.55 or 0.1
+                b.Text = "  👤 " .. p.Name
+                b.TextColor3 = TH.text
+                b.Font = Enum.Font.Gotham
+                b.TextSize = 11
+                b.TextXAlignment = Enum.TextXAlignment.Left
+                b.AutoButtonColor = false
+                b.Parent = PlayerList
+                Corner(b, 7)
+                b.MouseButton1Click:Connect(function()
+                    Target = p
+                    StopFun()
+                    SetStatus("الهدف: " .. p.Name)
+                    for _, o in ipairs(PlayerList:GetChildren()) do
+                        if o:IsA("TextButton") then
+                            o.BackgroundColor3 = Color3.fromRGB(26, 26, 40)
+                            o.BackgroundTransparency = 0.1
+                        end
+                    end
+                    b.BackgroundColor3 = TH.violet
+                    b.BackgroundTransparency = 0.55
+                end)
+            end
+        end
+    end
+    BuildList()
+    AddButton(P, "🔄 تحديث القائمة", Color3.fromRGB(30, 40, 70), BuildList)
+    Track(Players.PlayerAdded:Connect(function() task.wait(0.5) BuildList() end))
+    Track(Players.PlayerRemoving:Connect(function(p)
+        if p == Target then Target = nil StopFun() end
+        task.wait(0.5)
+        BuildList()
+    end))
+
+    Section(P, "الحركات")
+    AddButton(P, "👤 الظل: أمشي خلفه مع رقصة", nil, function() StartFun("shadow") end)
+    AddButton(P, "🛰️ الدوران: أدور حوله كقمر صناعي", nil, function() StartFun("orbit") end)
+    AddButton(P, "🎒 الراكب: أركب على ظهره", nil, function() StartFun("rider") end)
+    AddButton(P, "🏃 المطاردة: ألاحقه بسرعة", nil, function() StartFun("chase") end)
+    AddButton(P, "🛑 إيقاف الحركة", Color3.fromRGB(90, 26, 40), StopFun)
+
+    AddToggle(P, "💬 رسائل مضحكة أثناء المطاردة", "taunt", function(v)
+        if not v then return end
+        local lines = {"أنا جاييك! 🏃", "لا تهرب! 😂", "وصلت! 👋", "انتبه من خلفك 👀", "ما راح تفلت مني 😈"}
+        Loop("taunt", 6, function()
+            if Shared.FunMode == "chase" then Chat(lines[math.random(#lines)]) end
+        end)
+    end)
+
+    Section(P, "الرقص")
+    local function StopGroup()
+        for _, t in pairs(GroupTracks) do pcall(function() t:Stop() end) end
+        GroupTracks = {}
+    end
+    table.insert(Cleanups, StopGroup)
+
+    local DanceBtn
+    DanceBtn = AddButton(P, "🔄 الرقصة الحالية: 1", nil, function()
+        DanceIdx = DanceIdx % #DANCES + 1
+        DanceBtn.Text = "🔄 الرقصة الحالية: " .. DanceIdx
+        if Shared.FunMode == "shadow" then PlayAnim(DANCES[DanceIdx]) end
+        StopGroup()
+    end)
+
+    AddToggle(P, "💃 رقصة جماعية للجميع (تظهر عندك)", "groupdance", function(v)
+        if not v then StopGroup() return end
+        Loop("groupdance", 2, function()
+            for _, p in ipairs(Players:GetPlayers()) do
+                local h = p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+                if h then
+                    local t = GroupTracks[p]
+                    if not (t and t.IsPlaying) then
+                        local animator = h:FindFirstChildOfClass("Animator") or Instance.new("Animator", h)
+                        local a = Instance.new("Animation")
+                        a.AnimationId = DANCES[DanceIdx]
+                        local track = animator:LoadAnimation(a)
+                        track.Looped = true
+                        track:Play()
+                        GroupTracks[p] = track
+                    end
+                end
+            end
+        end)
+    end)
+end
+
+---------------------------------------------------------
+-- 🌀 الانتقال
+---------------------------------------------------------
+do
+    local P = TpPage
+    Section(P, "القاعدة")
+    AddButton(P, "💾 حفظ موقع القاعدة", nil, function(b)
+        local r = GetRoot()
+        if r then
+            BaseCFrame = r.CFrame
+            b.Text = "🔒 تم الحفظ"
+            Notify("القاعدة", "تم حفظ الموقع", TH.on)
+            task.wait(1)
+            b.Text = "💾 حفظ موقع القاعدة"
+        end
+    end)
+    AddButton(P, "🌀 الانتقال للقاعدة", Color3.fromRGB(24, 70, 50), GoBase)
+
+    Section(P, "موقع آخر")
+    AddButton(P, "💾 حفظ موقع السرقة", nil, function(b)
+        local r = GetRoot()
+        if r then
+            StealCFrame = r.CFrame
+            b.Text = "🔒 تم الحفظ"
+            task.wait(1)
+            b.Text = "💾 حفظ موقع السرقة"
+        end
+    end)
+    AddButton(P, "🌀 الانتقال لموقع السرقة", Color3.fromRGB(24, 70, 50), function()
+        local r = GetRoot()
+        if r and StealCFrame then r.CFrame = StealCFrame end
+    end)
+
+    Section(P, "تلقائي")
+    AddToggle(P, "↩️ العودة للقاعدة بعد أي تفاعل", "returnBase")
+    if PPS then
+        Track(PPS.PromptTriggered:Connect(function(_, who)
+            if State.returnBase and who == Player and BaseCFrame and not Busy then
+                task.wait(0.1)
+                GoBase()
+            end
+        end))
+    end
+end
+
+---------------------------------------------------------
+-- ⚡ الحركة
+---------------------------------------------------------
+do
+    local P = MovePage
+    local WalkSpeedVal, FlySpeedVal = 24, 50
+
+    Section(P, "السرعة")
+    AddToggle(P, "⚡ تفعيل السرعة", "speed", function(v)
+        if v then
+            Loop("speed", 0.2, function()
+                local h = GetHum()
+                if h and Shared.FunMode ~= "chase" then h.WalkSpeed = WalkSpeedVal end
+            end)
+        else
+            local h = GetHum()
+            if h then h.WalkSpeed = 16 end
+        end
+    end)
+    AddStepper(P, "قيمة السرعة", 16, 150, 10, 24, function(v) WalkSpeedVal = v end)
+
+    Section(P, "الطيران")
+    local flyConn, bv, bg
+    local function StopFly()
+        if flyConn then flyConn:Disconnect() flyConn = nil end
+        if bv then bv:Destroy() bv = nil end
+        if bg then bg:Destroy() bg = nil end
+    end
+    table.insert(Cleanups, StopFly)
+    local function StartFly()
+        StopFly()
+        local root = GetRoot()
+        if not root then return end
+        bv = Instance.new("BodyVelocity")
+        bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+        bv.Velocity = Vector3.zero
+        bv.Parent = root
+        bg = Instance.new("BodyGyro")
+        bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+        bg.P = 9e4
+        bg.Parent = root
+        flyConn = RunService.RenderStepped:Connect(function()
+            local r, h, cam = GetRoot(), GetHum(), workspace.CurrentCamera
+            if not (r and h and bv and bv.Parent) then StopFly() return end
+            local rel = cam.CFrame:VectorToObjectSpace(h.MoveDirection)
+            bv.Velocity = (cam.CFrame.RightVector * rel.X + cam.CFrame.LookVector * -rel.Z) * FlySpeedVal
+            bg.CFrame = cam.CFrame
+        end)
+    end
+    AddToggle(P, "🕊️ الطيران (بالعصا)", "fly", function(v)
+        if v then StartFly() else StopFly() end
+    end)
+    AddStepper(P, "سرعة الطيران", 15, 200, 15, 50, function(v) FlySpeedVal = v end)
+    Track(Player.CharacterAdded:Connect(function()
+        task.wait(1)
+        if State.fly then StartFly() end
+    end))
+
+    Section(P, "أخرى")
+    AddToggle(P, "🤸 القفز اللانهائي", "infjump")
+    Track(UIS.JumpRequest:Connect(function()
+        local h = GetHum()
+        if State.infjump and h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end))
+
+    AddToggle(P, "👻 اختراق الجدران (Noclip)", "noclip")
+    Track(RunService.Stepped:Connect(function()
+        if State.noclip and Player.Character then
+            for _, part in ipairs(Player.Character:GetDescendants()) do
+                if part:IsA("BasePart") then part.CanCollide = false end
+            end
+        end
+    end))
+end
+
+---------------------------------------------------------
+-- 🔧 الأدوات
+---------------------------------------------------------
+do
+    local P = ToolsPage
+
+    Section(P, "الرؤية")
+    local function ApplyESP(p)
+        if p == Player or not p.Character then return end
+        if not p.Character:FindFirstChild("HamoESP") then
+            local h = Instance.new("Highlight")
+            h.Name = "HamoESP"
+            h.FillColor = TH.pink
+            h.OutlineColor = Color3.new(1, 1, 1)
+            h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            h.Parent = p.Character
+        end
+    end
+    local function ClearESP()
+        for _, p in ipairs(Players:GetPlayers()) do
+            local h = p.Character and p.Character:FindFirstChild("HamoESP")
+            if h then h:Destroy() end
+        end
+    end
+    table.insert(Cleanups, ClearESP)
+    local function HookESP(p)
+        Track(p.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            if State.esp then ApplyESP(p) end
+        end))
+    end
+    for _, p in ipairs(Players:GetPlayers()) do HookESP(p) end
+    Track(Players.PlayerAdded:Connect(HookESP))
+
+    AddToggle(P, "🔍 رؤية اللاعبين عبر الجدران (ESP)", "esp", function(v)
+        if v then
+            for _, p in ipairs(Players:GetPlayers()) do ApplyESP(p) end
+        else
+            ClearESP()
+        end
+    end)
+
+    Section(P, "المراقبة")
+    local specIndex = 0
+    local SpecBtn
+    SpecBtn = AddButton(P, "👁️ مراقبة اللاعب التالي", nil, function()
+        local list = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= Player and p.Character and p.Character:FindFirstChildOfClass("Humanoid") then
+                table.insert(list, p)
+            end
+        end
+        if #list == 0 then SpecBtn.Text = "⚠️ لا يوجد لاعبون" return end
+        specIndex = specIndex % #list + 1
+        workspace.CurrentCamera.CameraSubject = list[specIndex].Character:FindFirstChildOfClass("Humanoid")
+        SpecBtn.Text = "👁️ تراقب: " .. list[specIndex].Name .. " (اضغط للتالي)"
+    end)
+    AddButton(P, "⏹️ إيقاف المراقبة", nil, function()
+        local h = GetHum()
+        if h then workspace.CurrentCamera.CameraSubject = h end
+        SpecBtn.Text = "👁️ مراقبة اللاعب التالي"
+    end)
+
+    Section(P, "للتصوير (محلي فقط)")
+    local function ApplyBadge()
+        local head = Player.Character and Player.Character:FindFirstChild("Head")
+        if not head then return end
+        local old = head:FindFirstChild("HamoBadge")
+        if old then old:Destroy() end
+        local bb = Instance.new("BillboardGui")
+        bb.Name = "HamoBadge"
+        bb.Size = UDim2.new(0, 140, 0, 30)
+        bb.StudsOffset = Vector3.new(0, 2.8, 0)
+        bb.AlwaysOnTop = true
+        bb.Parent = head
+        local l = Instance.new("TextLabel")
+        l.Size = UDim2.new(1, 0, 1, 0)
+        l.BackgroundTransparency = 1
+        l.Font = Enum.Font.GothamBold
+        l.Text = Player.Name .. " ☑️"
+        l.TextColor3 = Color3.fromRGB(0, 170, 255)
+        l.TextSize = 16
+        l.TextStrokeTransparency = 0.2
+        l.Parent = bb
+    end
+    local function RemoveBadge()
+        local head = Player.Character and Player.Character:FindFirstChild("Head")
+        local b = head and head:FindFirstChild("HamoBadge")
+        if b then b:Destroy() end
+    end
+    table.insert(Cleanups, RemoveBadge)
+    AddToggle(P, "☑️ الشارة الزرقاء (تظهر لك فقط)", "badge", function(v)
+        if v then ApplyBadge() else RemoveBadge() end
+    end)
+    Track(Player.CharacterAdded:Connect(function()
+        task.wait(1)
+        if State.badge then ApplyBadge() end
+    end))
+end
+
+---------------------------------------------------------
+-- 🛡️ الحماية
+---------------------------------------------------------
+do
+    local P = SafePage
+    Section(P, "🛡️ Anti-Hit (قذف / شلل / دفع / تصادم)")
+
+    local Blocked = {fling = 0, state = 0, vel = 0}
+    local Flipped = setmetatable({}, {__mode = "k"})
+    local ARemotes, NPCs, CharConns = {}, {}, {}
+    local LastSpeed = 16
+    local PATTERNS = {"fling", "ragdoll", "knock", "stun", "stagger", "launch"}
+    local KB = {"BodyVelocity", "BodyForce", "BodyPosition", "BodyThrust", "BodyAngularVelocity",
+        "LinearVelocity", "VectorForce", "AngularVelocity", "AlignPosition"}
+    local AntiStat
+
+    local function matches(name)
+        name = name:lower()
+        for _, w in ipairs(PATTERNS) do
+            if name:find(w, 1, true) then return true end
+        end
+        return false
+    end
+
+    local function countFn() Blocked.fling += 1 end
+
+    local function addRemote(r)
+        if r:IsA("RemoteEvent") and matches(r.Name) and not ARemotes[r] then
+            ARemotes[r] = true
+            Track(r.OnClientEvent:Connect(countFn))
+        end
+    end
+    for _, d in ipairs(RS:GetDescendants()) do addRemote(d) end
+    Track(RS.DescendantAdded:Connect(addRemote))
+
+    local function applyBlock(on)
+        if not getconnections then return end
+        for r in pairs(ARemotes) do
+            local ok, list = pcall(getconnections, r.OnClientEvent)
+            if ok and list then
+                for _, c in ipairs(list) do
+                    local ours = false
+                    pcall(function() ours = (c.Function == countFn) end)
+                    if not ours then
+                        pcall(function()
+                            if on then c:Disable() else c:Enable() end
+                        end)
+                    end
+                end
+            end
+        end
+    end
+
+    local function lockStates(h)
+        local off = State.antihit and true or false
+        for _, s in ipairs({Enum.HumanoidStateType.Ragdoll, Enum.HumanoidStateType.FallingDown, Enum.HumanoidStateType.Physics}) do
+            pcall(function() h:SetStateEnabled(s, not off) end)
+        end
+    end
+
+    local function guardChar(char)
+        for _, c in ipairs(CharConns) do pcall(function() c:Disconnect() end) end
+        CharConns = {}
+        local function guard(d)
+            if d:IsA("BallSocketConstraint") then
+                if State.antihit then d.Enabled = false end
+            elseif d:IsA("Motor6D") and d.Parent and d.Parent:IsA("BasePart") then
+                CharConns[#CharConns + 1] = d:GetPropertyChangedSignal("Enabled"):Connect(function()
+                    if State.antihit and not d.Enabled then
+                        d.Enabled = true
+                        Blocked.state += 1
+                    end
+                end)
+            end
+        end
+        for _, d in ipairs(char:GetDescendants()) do guard(d) end
+        CharConns[#CharConns + 1] = char.DescendantAdded:Connect(guard)
+        local h = char:WaitForChild("Humanoid", 5)
+        if h then lockStates(h) end
+    end
+
+    if Player.Character then task.spawn(guardChar, Player.Character) end
+    Track(Player.CharacterAdded:Connect(function(c)
+        task.wait(0.5)
+        guardChar(c)
+    end))
+
+    Track(RunService.Heartbeat:Connect(function()
+        if not State.antihit then return end
+        local r, h = GetRoot(), GetHum()
+        if not (r and h) then return end
+
+        if h.PlatformStand then
+            h.PlatformStand = false
+            Blocked.state += 1
+        end
+        local st = h:GetState()
+        if st == Enum.HumanoidStateType.Ragdoll or st == Enum.HumanoidStateType.FallingDown
+            or st == Enum.HumanoidStateType.Physics then
+            h:ChangeState(Enum.HumanoidStateType.GettingUp)
+            Blocked.state += 1
+        end
+
+        if h.WalkSpeed >= 1 then
+            LastSpeed = h.WalkSpeed
+        elseif State.antiunfreeze then
+            h.WalkSpeed = LastSpeed
+            Blocked.state += 1
+        end
+
+        if not r:FindFirstChildOfClass("BodyGyro") then
+            for _, c in ipairs(r:GetChildren()) do
+                for _, cn in ipairs(KB) do
+                    if c:IsA(cn) then
+                        c:Destroy()
+                        Blocked.vel += 1
+                        break
+                    end
+                end
+            end
+
+            local v = r.AssemblyLinearVelocity
+            local capv = math.max(h.WalkSpeed * 1.3, 24) + 10
+            if Vector3.new(v.X, 0, v.Z).Magnitude > capv then
+                local md = h.MoveDirection
+                local nv = md.Magnitude > 0 and md.Unit * h.WalkSpeed or Vector3.zero
+                r.AssemblyLinearVelocity = Vector3.new(nv.X, v.Y, nv.Z)
+                Blocked.vel += 1
+                v = r.AssemblyLinearVelocity
+            end
+            if v.Y > 75 then
+                r.AssemblyLinearVelocity = Vector3.new(v.X, 50, v.Z)
+                Blocked.vel += 1
+            end
+        end
+        if r.AssemblyAngularVelocity.Magnitude > 8 then
+            r.AssemblyAngularVelocity = Vector3.zero
+        end
+    end))
+
+    local function nocollide(model)
+        for _, part in ipairs(model:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
+                Flipped[part] = true
+            end
+        end
+    end
+
+    local function restoreCollide()
+        for part in pairs(Flipped) do
+            if part.Parent then part.CanCollide = true end
+            Flipped[part] = nil
+        end
+    end
+
+    local function refreshNPCs()
+        local list = {}
+        local b = workspace:FindFirstChild("Build")
+        local zb = b and b:FindFirstChild("ZoneBuilds")
+        if zb then
+            for _, h in ipairs(zb:GetDescendants()) do
+                if h:IsA("Humanoid") and h.Parent then list[#list + 1] = h.Parent end
+            end
+        end
+        NPCs = list
+    end
+
+    local lastNC = 0
+    Track(RunService.Stepped:Connect(function()
+        if not State.antihit then return end
+        local now = os.clock()
+        if now - lastNC < 0.2 then return end
+        lastNC = now
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= Player and pl.Character then nocollide(pl.Character) end
+        end
+        for _, m in ipairs(NPCs) do
+            if m.Parent then nocollide(m) end
+        end
+    end))
+
+    local function setAnti(v)
+        local h = GetHum()
+        if h then lockStates(h) end
+        applyBlock(v)
+        if v then refreshNPCs() else restoreCollide() end
+    end
+
+    AddToggle(P, "🛡️ تفعيل Anti-Hit", "antihit", setAnti)
+    AddToggle(P, "🔓 إلغاء الشلل (قد يتعارض مع المشاية)", "antiunfreeze")
+
+    AntiStat = Section(P, "")
+    AntiStat.TextWrapped = true
+    AntiStat.TextSize = 10
+    AntiStat.TextColor3 = TH.sub
+
+    task.spawn(function()
+        local n = 0
+        while Alive do
+            n += 1
+            if State.antihit then
+                if n % 5 == 0 then applyBlock(true) end
+                if n % 15 == 0 then refreshNPCs() end
+            end
+            AntiStat.Text = string.format("%s | 🚫 %d | 🛡️ %d | ⚡ %d%s",
+                State.antihit and "يعمل" or "متوقف", Blocked.fling, Blocked.state, Blocked.vel,
+                getconnections and "" or "  ⚠️ لا يوجد getconnections")
+            task.wait(0.4)
+        end
+    end)
+
+    table.insert(Cleanups, function()
+        for _, c in ipairs(CharConns) do pcall(function() c:Disconnect() end) end
+        local h = GetHum()
+        if h then lockStates(h) end
+        applyBlock(false)
+        restoreCollide()
+    end)
+
+    Section(P, "أخرى")
+    AddToggle(P, "💤 منع الطرد بسبب الخمول (Anti-AFK)", "afk")
+    Track(Player.Idled:Connect(function()
+        if State.afk and VirtualUser then
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.new())
+            end)
+        end
+    end))
+
+    Section(P, "Gameplay Paused")
+
+    local function Unpause()
+        pcall(function() Player.GameplayPaused = false end)
+        if sethiddenproperty then
+            pcall(sethiddenproperty, Player, "GameplayPaused", false)
+        end
+    end
+
+    local function DisableStreamPause()
+        pcall(function() workspace.StreamingPauseMode = Enum.StreamingPauseMode.Disabled end)
+        if sethiddenproperty then
+            pcall(sethiddenproperty, workspace, "StreamingPauseMode", Enum.StreamingPauseMode.Disabled)
+        end
+    end
+
+    local function HideOverlay()
+        local roots = {Player:FindFirstChild("PlayerGui"), CoreGui}
+        for _, root in ipairs(roots) do
+            if root then
+                for _, d in ipairs(root:GetDescendants()) do
+                    if d:IsA("TextLabel") and not d:IsDescendantOf(Hub) then
+                        local t = lower(d.Text or "")
+                        if t:find("gameplay paused") or t:find("gameplay is paused") then
+                            d.Visible = false
+                            if d.Parent and d.Parent:IsA("Frame") then d.Parent.Visible = false end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    pcall(function()
+        Track(Player:GetPropertyChangedSignal("GameplayPaused"):Connect(function()
+            if State.nopause then Unpause() end
+        end))
+    end)
+
+    AddToggle(P, "⏯️ منع Gameplay Paused وإخفاء رسالته", "nopause", function(v)
+        if not v then return end
+        DisableStreamPause()
+        Unpause()
+        Loop("nopause", 0.5, function()
+            Unpause()
+            HideOverlay()
+        end)
+    end)
+end
+
+---------------------------------------------------------
+-- 🥚 Break & Steal an Anime Egg — v2 مصحّح
+---------------------------------------------------------
+local okBS, errBS = pcall(function()
+Step("تبويب Break & Steal")
+    local BS = CreateTab("🥚 Break & Steal")
+
+    local lw = string.lower
+    local function norm(s) return (lw(tostring(s or "")):gsub("[%s_%-]", "")) end
+
+    ---------------------------------------------------------
+    -- أدوات مساعدة (كانت ناقصة في نسختك)
+    ---------------------------------------------------------
+    local function ser(v, d)
+        d = d or 0
+        local t = typeof(v)
+        if t == "string" then return string.format("%q", #v > 60 and v:sub(1, 60) or v)
+        elseif t == "table" then
+            if d > 2 then return "{..}" end
+            local o, n = {}, 0
+            for k, x in pairs(v) do
+                n += 1
+                if n > 8 then o[#o + 1] = ".." break end
+                o[#o + 1] = tostring(k) .. "=" .. ser(x, d + 1)
+            end
+            return "{" .. table.concat(o, ",") .. "}"
+        elseif t == "Instance" then return "Inst(" .. v:GetFullName() .. ")"
+        elseif t == "Vector3" then return string.format("V3(%.1f,%.1f,%.1f)", v.X, v.Y, v.Z)
+        elseif t == "CFrame" then local p = v.Position return string.format("CF(%.1f,%.1f,%.1f)", p.X, p.Y, p.Z)
+        end
+        return tostring(v)
+    end
+
+    local function attrsOf(i)
+        local t = {}
+        for k, v in pairs(i:GetAttributes()) do
+            if not tostring(k):find("^__") then t[#t + 1] = k .. "=" .. ser(v) end
+        end
+        return #t > 0 and (" {" .. table.concat(t, ", ") .. "}") or ""
+    end
+
+    local function treeTo(o, inst, depth, maxD, limit)
+        if depth > maxD then return end
+        local kids = inst:GetChildren()
+        for i, c in ipairs(kids) do
+            if i > limit then o[#o + 1] = string.rep("  ", depth) .. "... +" .. (#kids - limit) break end
+            o[#o + 1] = string.rep("  ", depth) .. c.Name .. " [" .. c.ClassName .. "]" .. attrsOf(c)
+            treeTo(o, c, depth + 1, maxD, limit)
+        end
+    end
+
+    local function parseSet(s)
+        local t = {}
+        for n in tostring(s or ""):gmatch("%d+") do t[tonumber(n)] = true end
+        return t
+    end
+    local function maxKey(t)
+        local m = 0
+        for n in pairs(t) do if n > m then m = n end end
+        return m
+    end
+
+    ---------------------------------------------------------
+    -- الندرات والأنواع
+    ---------------------------------------------------------
+    local RARITIES = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Divine", "Cosmic", "Secret"}
+    local RANK = {}
+    for i, n in ipairs(RARITIES) do RANK[norm(n)] = i end
+    local RCOL = {
+        common = Color3.fromRGB(150, 150, 160), uncommon = Color3.fromRGB(90, 200, 110),
+        rare = Color3.fromRGB(70, 150, 255), epic = Color3.fromRGB(170, 90, 255),
+        legendary = Color3.fromRGB(255, 170, 40), mythic = Color3.fromRGB(255, 80, 120),
+        divine = Color3.fromRGB(255, 235, 120), cosmic = Color3.fromRGB(60, 220, 230),
+        secret = Color3.fromRGB(255, 90, 90), unknown = Color3.fromRGB(180, 180, 200),
+    }
+
+    local Chosen = {unknown = true}
+    for _, n in ipairs(RARITIES) do Chosen[norm(n)] = true end
+    local ChosenZ = {}
+    local SkipCaught = true
+
+    local Species = {}
+    for k, v in pairs({Bat = "Uncommon", Ankylosaurus = "Rare", MantisShrimp = "Mythic", GoblinShark = "Divine",
+        ["T-Rex"] = "Cosmic", barracuda = "Epic", LeafySeaDragon = "Cosmic", DumboOctopus = "Cosmic",
+        Chicken = "Common", Akita = "Secret", Snail = "Rare", Cuttlefish = "Rare", Bunny = "Uncommon"}) do
+        Species[norm(k)] = norm(v)
+    end
+
+    local function learn()
+        local function take(i)
+            local an, r = i:GetAttribute("AnimalName"), i:GetAttribute("Rarity")
+            if an and r then Species[norm(an)] = norm(r) end
+        end
+        local bp = Player:FindFirstChildOfClass("Backpack")
+        if bp then for _, t in ipairs(bp:GetChildren()) do take(t) end end
+        if Player.Character then
+            for _, t in ipairs(Player.Character:GetChildren()) do if t:IsA("Tool") then take(t) end end
+        end
+        local plots = workspace:FindFirstChild("Plots")
+        if plots then
+            for _, b in ipairs(plots:GetChildren()) do
+                local pa = b:FindFirstChild("PlacedAnimals")
+                if pa then for _, a in ipairs(pa:GetChildren()) do take(a) end end
+            end
+        end
+    end
+
+    local function rarityOf(m)
+        local r = m:GetAttribute("Rarity")
+        if r then return norm(r) end
+
+        local hrp = m:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            r = hrp:GetAttribute("Rarity")
+            if r then return norm(r) end
+            local pr = hrp:FindFirstChild("StealPrompt", true)
+            if pr then
+                r = pr:GetAttribute("Rarity") or pr:GetAttribute("DetailRarity")
+                if r then return norm(r) end
+            end
+        end
+
+        local v = m:FindFirstChild("Rarity", true)
+        if v and v:IsA("StringValue") then return norm(v.Value) end
+
+        local an = m:GetAttribute("AnimalName") or m.Name
+        return Species[norm(an)] or "unknown"
+    end
+
+    -- ZoneId قد يكون رقماً أو نصاً
+    local function zoneIdOf(m)
+        local z = m:GetAttribute("ZoneId")
+        if z == nil then return nil end
+        if typeof(z) == "number" then return z end
+        local n = tonumber(tostring(z):match("%d+"))
+        return n
+    end
+
+    local function despawnAt(m)
+        local d = m:GetAttribute("DespawnAtServerTime")
+        return typeof(d) == "number" and d or math.huge
+    end
+
+    local function isCaught(m)
+        return m:GetAttribute("CaughtUserId") ~= nil
+    end
+
+    ---------------------------------------------------------
+    -- المناطق
+    ---------------------------------------------------------
+    local Zones = {}
+    local function loadZones()
+        Zones = {}
+        local b = workspace:FindFirstChild("Build")
+        local zb = b and b:FindFirstChild("ZoneBuilds")
+        if not zb then return end
+        for _, z in ipairs(zb:GetChildren()) do
+            local n = tonumber(z.Name:match("%d+"))
+            if n then
+                local ok, cf = pcall(function() return z:GetPivot() end)
+                if ok then Zones[#Zones + 1] = {n = n, pos = cf.Position} end
+            end
+        end
+        table.sort(Zones, function(a, b) return a.n < b.n end)
+    end
+
+    local function zoneOf(pos)
+        local best, bd
+        for _, z in ipairs(Zones) do
+            local d = (Vector3.new(z.pos.X, 0, z.pos.Z) - Vector3.new(pos.X, 0, pos.Z)).Magnitude
+            if not bd or d < bd then best, bd = z.n, d end
+        end
+        return best
+    end
+
+    ---------------------------------------------------------
+    -- القاعدة والحمل
+    ---------------------------------------------------------
+    local Base
+    local Delay = 1.5
+
+    local function myPlot()
+        local plots = workspace:FindFirstChild("Plots")
+        if not plots then return end
+        for _, p in ipairs(plots:GetChildren()) do
+            if p:GetAttribute("OwnerUserId") == Player.UserId then return p end
+        end
+    end
+
+    local function ensureBase()
+        if Base then return Base end
+        local r = GetRoot()
+        local plot = myPlot()
+        if plot then
+            local ok, cf = pcall(function() return plot:GetPivot() end)
+            if ok then
+                if r and (r.Position - cf.Position).Magnitude < 160 then
+                    Base = r.CFrame
+                else
+                    Base = CFrame.new(cf.Position + Vector3.new(0, 6, 0))
+                end
+            end
+        end
+        if not Base and r then Base = r.CFrame end
+        return Base
+    end
+
+    local function carry() return Player:GetAttribute("CarryCount") or 0 end
+    local function cap() return Player:GetAttribute("SatchelCapacity") or 1 end
+
+    local function bank()
+        local b, r = ensureBase(), GetRoot()
+        if not (b and r) then return false end
+        r.CFrame = b
+        local t = os.clock()
+        while os.clock() - t < 5 do
+            if carry() == 0 then return true end
+            task.wait(0.15)
+        end
+        return carry() == 0
+    end
+
+    ---------------------------------------------------------
+    -- السرقة
+    ---------------------------------------------------------
+    local Cool = setmetatable({}, {__mode = "k"})
+
+    local function targets()
+        local list, seen, unk = {}, 0, 0
+        local pk = workspace:FindFirstChild("AnimalPickups")
+        if not pk then return list, 0, 0 end
+        local r = GetRoot()
+        local now = workspace:GetServerTimeNow()
+
+        for _, m in ipairs(pk:GetChildren()) do
+            local hrp = m:FindFirstChild("HumanoidRootPart")
+            local pr = hrp and hrp:FindFirstChild("StealPrompt", true)
+            if pr and pr.Enabled then
+                seen += 1
+                local rar = rarityOf(m)
+                local key = (rar and RANK[rar]) and rar or "unknown"
+                if key == "unknown" then unk += 1 end
+
+                local zNum = zoneIdOf(m)
+                local remaining = despawnAt(m) - now
+                local urgent = remaining < 30
+                local caught = isCaught(m)
+
+                if Chosen[key]
+                    and (zNum == nil or ChosenZ[zNum])
+                    and (Cool[m] or 0) < os.clock()
+                    and not (SkipCaught and caught) then
+                    list[#list + 1] = {
+                        m = m, key = key, z = zNum,
+                        rank = RANK[key] or 0,
+                        w = m:GetAttribute("WeightKg") or 0,
+                        remaining = remaining,
+                        urgent = urgent,
+                        d = r and (hrp.Position - r.Position).Magnitude or 0,
+                    }
+                end
+            end
+        end
+
+        table.sort(list, function(a, b)
+            if a.urgent ~= b.urgent then return a.urgent end
+            if a.rank ~= b.rank then return a.rank > b.rank end
+            if a.w ~= b.w then return a.w > b.w end
+            return a.d < b.d
+        end)
+        return list, seen, unk
+    end
+
+    local function stealOnce(t)
+        local r = GetRoot()
+        if not r then return false end
+        local before = carry()
+        for _ = 1, 2 do
+            local hrp = t.m:FindFirstChild("HumanoidRootPart")
+            local pr = hrp and hrp:FindFirstChild("StealPrompt", true)
+            if not (hrp and pr and pr.Enabled) then return false end
+            r.CFrame = CFrame.new(hrp.Position + Vector3.new(0, 3, 0))
+            task.wait(0.15)
+            UsePrompt(pr)
+            local w = os.clock()
+            while os.clock() - w < 1.4 do
+                if carry() > before then return true end
+                task.wait(0.05)
+            end
+        end
+        return false
+    end
+
+    ---------------------------------------------------------
+    -- الضغط على أزرار الواجهة
+    ---------------------------------------------------------
+    local function Press(b)
+        if not b then return false end
+        if getconnections then
+            for _, sig in ipairs({"Activated", "MouseButton1Click", "MouseButton1Down"}) do
+                local ok, conns = pcall(getconnections, b[sig])
+                if ok and conns and #conns > 0 then
+                    for _, c in ipairs(conns) do
+                        pcall(function()
+                            if c.Fire then c:Fire()
+                            elseif c.Function then c.Function() end
+                        end)
+                    end
+                    return true
+                end
+            end
+        end
+        if firesignal then
+            pcall(firesignal, b.Activated)
+            pcall(firesignal, b.MouseButton1Click)
+            return true
+        end
+        return false
+    end
+
+    local function mainFrames()
+        local pg = Player:FindFirstChild("PlayerGui")
+        local mg = pg and pg:FindFirstChild("MainGUI")
+        return mg and mg:FindFirstChild("Frames")
+    end
+
+    ---------------------------------------------------------
+    -- الريموتس الحقيقية
+    ---------------------------------------------------------
+    local RTrailShop  = FindRemote("TrailShopRequest")
+    local RPickShop   = FindRemote("PickaxeShopRequest")
+    local RPetsInv    = FindRemote("PetsInventoryRemote")
+    local REggHit     = FindRemote("EggHitRequest")
+    local RUpgrade    = FindRemote("UpgradePlotRequest")
+
+    local function fireRemote(r, ...)
+        if not r then return false end
+        local a = table.pack(...)
+        return pcall(function()
+            if r:IsA("RemoteFunction") then
+                return r:InvokeServer(table.unpack(a, 1, a.n))
+            else
+                r:FireServer(table.unpack(a, 1, a.n))
+            end
+        end)
+    end
+
+    ---------------------------------------------------------
+    -- الواجهة
+    ---------------------------------------------------------
+    local StatLbl = Section(BS, "الحالة: متوقفة")
+    StatLbl.TextColor3 = TH.on
+    StatLbl.TextSize = 10
+    StatLbl.TextWrapped = true
+    local function Stat(t) StatLbl.Text = t end
+
+    local Stat2 = Section(BS, "")
+    Stat2.TextColor3 = TH.gold
+    Stat2.TextSize = 10
+    Stat2.TextWrapped = true
+    local function Stat2Set(t) Stat2.Text = t end
+
+    Section(BS, "السرقة")
+
+    AddToggle(BS, "🤖 سرقة تلقائية (تذهب، تسرق، تودع، تكرر)", "bs_steal", function(v)
+        if not v then Stat("الحالة: متوقفة") return end
+        ensureBase()
+        learn()
+        Notify("Break & Steal", "بدأت السرقة التلقائية", TH.on)
+        Loop("bs_steal", 0.4, function()
+            if Busy then return end
+            if carry() >= cap() then
+                WithBusy(function()
+                    Stat("📦 إيداع...")
+                    if not bank() then Stat("⚠️ لم يُودع تلقائياً (احفظ القاعدة وأنت فيها)") task.wait(2) end
+                end)
+                return
+            end
+            local list, seen, unk = targets()
+            local t = list[1]
+            if not t then
+                Stat(string.format("🔎 لا هدف | موجود %d | ندرة مجهولة %d", seen, unk))
+                return
+            end
+            local remainTxt = t.remaining < math.huge and string.format(" (⏳%.0fs)", t.remaining) or ""
+            Stat(string.format("🎯 %s | %s | Zone%s%s", t.m.Name, t.key, tostring(t.z or "?"), remainTxt))
+            WithBusy(function()
+                if stealOnce(t) then
+                    task.wait(Delay)
+                    local ok = bank()
+                    Stat(ok and "✅ سُرق وأُودع" or "⚠️ سُرق لكن لم يُودع (احفظ القاعدة)")
+                    task.wait(0.5)
+                else
+                    Cool[t.m] = os.clock() + 8
+                end
+            end)
+        end)
+    end)
+
+    AddToggle(BS, "🚫 تجاهل الحيوانات المملوكة (CaughtUserId)", "bs_skipcaught", function(v)
+        SkipCaught = v
+    end)
+    SkipCaught = true
+
+    AddToggle(BS, "🤝 بعد سرقتي اليدوية: انتظر ثم ارجع للقاعدة", "bs_manual")
+    do
+        local last = carry()
+        Track(Player:GetAttributeChangedSignal("CarryCount"):Connect(function()
+            local c = carry()
+            local rising = c > last
+            last = c
+            if State.bs_manual and rising and not Busy then
+                task.spawn(function()
+                    WithBusy(function()
+                        task.wait(Delay)
+                        bank()
+                    end)
+                end)
+            end
+        end))
+    end
+
+    AddStepper(BS, "الانتظار بعد السرقة (ثانية)", 0.5, 5, 0.5, 1.5, function(v) Delay = v end)
+
+    AddButton(BS, "💾 حفظ القاعدة (قف فيها أولاً)", nil, function(b)
+        local r = GetRoot()
+        if r then
+            Base = r.CFrame
+            b.Text = "✅ تم الحفظ"
+            Notify("القاعدة", "تم حفظ موقع الإيداع", TH.on)
+            task.wait(1.2)
+            b.Text = "💾 حفظ القاعدة (قف فيها أولاً)"
+        end
+    end)
+
+    AddButton(BS, "🌀 الانتقال للقاعدة", Color3.fromRGB(24, 70, 50), function()
+        local r, b = GetRoot(), ensureBase()
+        if r and b then r.CFrame = b end
+    end)
+
+    ---------------------------------------------------------
+    -- اختيار المنطقة والندرة
+    ---------------------------------------------------------
+    local function chips(items, cols, state)
+        local grid = Instance.new("Frame")
+        grid.Size = UDim2.new(1, -4, 0, 0)
+        grid.AutomaticSize = Enum.AutomaticSize.Y
+        grid.BackgroundTransparency = 1
+        grid.LayoutOrder = nextOrder(BS)
+        grid.Parent = BS
+        local g = Instance.new("UIGridLayout")
+        g.CellSize = UDim2.new(1 / cols - 0.02, 0, 0, 28)
+        g.CellPadding = UDim2.new(0.02, 0, 0, 5)
+        g.SortOrder = Enum.SortOrder.LayoutOrder
+        g.Parent = grid
+        local paints = {}
+        for i, it in ipairs(items) do
+            local b = Instance.new("TextButton")
+            b.LayoutOrder = i
+            b.Text = it.label
+            b.Font = Enum.Font.GothamBold
+            b.TextSize = 10
+            b.AutoButtonColor = false
+            b.Parent = grid
+            Corner(b, 9)
+            Stroke(b, it.color, 1.4, 0.35)
+            local function paint()
+                if state[it.key] then
+                    b.BackgroundColor3 = it.color
+                    b.TextColor3 = Color3.fromRGB(10, 10, 14)
+                else
+                    b.BackgroundColor3 = TH.card
+                    b.TextColor3 = it.color
+                end
+            end
+            paints[it.key] = paint
+            paint()
+            b.MouseButton1Click:Connect(function()
+                state[it.key] = not state[it.key]
+                paint()
+            end)
+        end
+        AddButton(BS, "↔ تحديد / إلغاء الكل", nil, function()
+            local anyOff = false
+            for _, it in ipairs(items) do if not state[it.key] then anyOff = true end end
+            for _, it in ipairs(items) do
+                state[it.key] = anyOff
+                paints[it.key]()
+            end
+        end)
+    end
+
+    loadZones()
+    Section(BS, "اختر المنطقة (حسب ZoneId)")
+    if #Zones == 0 then
+        Section(BS, "⚠️ لم أجد المناطق، ستُسرق كل المناطق")
+    else
+        local zi = {}
+        for i, z in ipairs(Zones) do
+            ChosenZ[z.n] = true
+            zi[#zi + 1] = {key = z.n, label = "Zone " .. z.n, color = Color3.fromHSV((i / (#Zones + 1)) % 1, 0.6, 1)}
+        end
+        chips(zi, 3, ChosenZ)
+    end
+
+    Section(BS, "اختر الندرات")
+    do
+        local ri = {}
+        for _, n in ipairs(RARITIES) do
+            local k = norm(n)
+            ri[#ri + 1] = {key = k, label = n, color = RCOL[k]}
+        end
+        ri[#ri + 1] = {key = "unknown", label = "❓ Unknown", color = RCOL.unknown}
+        chips(ri, 3, Chosen)
+    end
+
+    ---------------------------------------------------------
+    -- تلقائي عبر الريموتس
+    ---------------------------------------------------------
+    Section(BS, "تلقائي (عبر الريموتس المباشرة)")
+
+    AddToggle(BS, "🏅 تجهيز أفضل الحيوانات (Equip Best)", "bs_equip", function(v)
+        if not v then return end
+        Loop("bs_equip", 25, function()
+            if RPetsInv then
+                fireRemote(RPetsInv, "EquipBest", nil)
+                Stat2Set("🏅 جُهّز أفضل الحيوانات (remote)")
+            else
+                local f = mainFrames()
+                local pi = f and f:FindFirstChild("PetsInventory")
+                local b = pi and pi:FindFirstChild("Equip Best", true)
+                if b then Press(b) Stat2Set("🏅 جُهّز (زر الواجهة)") else Stat2Set("⚠️ PetsInventoryRemote غير موجود") end
+            end
+        end)
+    end)
+
+    local function pickStep()
+        if not RPickShop then Stat2Set("⚠️ PickaxeShopRequest غير موجود") return end
+        local owned = parseSet(Player:GetAttribute("OwnedPickaxes"))
+        local cur = Player:GetAttribute("PickaxeTier") or 0
+
+        local highest = 0
+        local f = mainFrames()
+        local pk = f and f:FindFirstChild("Pickaxes")
+        local sf = pk and pk:FindFirstChild("ScrollingFrame")
+        if sf then
+            for _, c in ipairs(sf:GetChildren()) do
+                local n = tonumber(tostring(c.Name):match("Tier(%d+)"))
+                if n and n > highest then highest = n end
+            end
+        end
+        if highest == 0 then highest = 50 end
+
+        for tier = highest, 1, -1 do
+            if not owned[tier] then
+                local before = Player:GetAttribute("OwnedPickaxes")
+                fireRemote(RPickShop, "Buy", tier)
+                task.wait(0.7)
+                if Player:GetAttribute("OwnedPickaxes") ~= before then
+                    Stat2Set("✅ اشتريت Pickaxe Tier " .. tier)
+                    return
+                end
+            end
+        end
+        local best = maxKey(parseSet(Player:GetAttribute("OwnedPickaxes")))
+        if best > cur then
+            fireRemote(RPickShop, "Equip", best)
+            Stat2Set("🔧 جهّزت Pickaxe Tier " .. best)
+        end
+    end
+    AddToggle(BS, "⛏️ شراء وتجهيز أفضل Pickaxe (remote)", "bs_pick", function(v)
+        if v then Loop("bs_pick", 10, pickStep) end
+    end)
+
+    local function trailStep()
+        if not RTrailShop then Stat2Set("⚠️ TrailShopRequest غير موجود") return end
+        local owned = parseSet(Player:GetAttribute("OwnedTrails"))
+        local equipped = tonumber(Player:GetAttribute("EquippedTrail")) or 0
+
+        local highest = 0
+        local f = mainFrames()
+        local trails = f and f:FindFirstChild("Trails")
+        local sf = trails and trails:FindFirstChild("ScrollingFrame")
+        if sf then
+            for _, c in ipairs(sf:GetChildren()) do
+                local n = tonumber(tostring(c.Name):match("Trail(%d+)"))
+                if n and n > highest then highest = n end
+            end
+        end
+        if highest == 0 then highest = 20 end
+
+        for id = highest, 1, -1 do
+            if not owned[id] then
+                local before = Player:GetAttribute("OwnedTrails")
+                fireRemote(RTrailShop, "Buy", id)
+                task.wait(0.7)
+                if Player:GetAttribute("OwnedTrails") ~= before then
+                    Stat2Set("✅ اشتريت Trail " .. id)
+                    return
+                end
+            end
+        end
+        local best = maxKey(parseSet(Player:GetAttribute("OwnedTrails")))
+        if best > equipped then
+            fireRemote(RTrailShop, "Equip", best)
+            Stat2Set("🌈 جهّزت Trail " .. best)
+        end
+    end
+    AddToggle(BS, "🌈 شراء وتجهيز أفضل Trail (remote)", "bs_trail", function(v)
+        if v then Loop("bs_trail", 12, trailStep) end
+    end)
+
+    ---------------------------------------------------------
+    -- كسر البيض تلقائياً
+    ---------------------------------------------------------
+    local function eggPrompts()
+        local out = {}
+        local roots = {workspace:FindFirstChild("Eggs"), workspace:FindFirstChild("Build"), myPlot()}
+        for _, root in ipairs(roots) do
+            if root then
+                for _, d in ipairs(root:GetDescendants()) do
+                    if d:IsA("ProximityPrompt") and d.Enabled then
+                        local n = lw(d.Name)
+                        if n:find("egg") or n:find("break") or n:find("hit") or n:find("crack") then
+                            out[#out + 1] = d
+                        end
+                    end
+                end
+            end
+        end
+        return out
+    end
+
+    AddToggle(BS, "🥚 كسر البيض تلقائياً (ProximityPrompt)", "bs_egg", function(v)
+        if not v then return end
+        Loop("bs_egg", 1.2, function()
+            if Busy then return end
+            local list = eggPrompts()
+            if #list == 0 then Stat2Set("⚠️ لا يوجد بيض قابل للكسر") return end
+            WithBusy(function()
+                for i = 1, math.min(#list, 3) do
+                    local p = list[i]
+                    if p and p.Enabled then
+                        local pos = PromptPos(p)
+                        local r = GetRoot()
+                        if pos and r then
+                            r.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+                            task.wait(0.2)
+                            UsePrompt(p)
+                            task.wait(0.35)
+                        end
+                    end
+                end
+                Stat2Set("🥚 حاولت كسر " .. math.min(#list, 3) .. " بيضة")
+            end)
+        end)
+    end)
+
+    AddButton(BS, "🏠 ترقية القاعدة (remote)", nil, function()
+        if RUpgrade then
+            fireRemote(RUpgrade)
+            Notify("القاعدة", "أُرسل طلب الترقية", TH.violet)
+        else
+            Notify("القاعدة", "UpgradePlotRequest غير موجود", TH.red)
+        end
+    end)
+
+    ---------------------------------------------------------
+    -- التشخيص
+    ---------------------------------------------------------
+    Section(BS, "🥚 البيض والتشخيص")
+
+    local Scout, counts = {}, {}
+    local NOISY = {"SpeedGain", "Treadmill", "Notify", "AntiAfk", "conch", "Analytics"}
+    local function rootPos()
+        local r = GetRoot()
+        return r and ser(r.Position) or "?"
+    end
+
+    _G.HamoBSCB = function(self, args)
+        if not State.bs_scout or #Scout >= 250 then return end
+        local full = self:GetFullName()
+        if not full:find("ReplicatedStorage", 1, true) then return end
+        for _, w in ipairs(NOISY) do if full:find(w, 1, true) then return end end
+        counts[full] = (counts[full] or 0) + 1
+        if counts[full] > 12 then return end
+        local parts = {}
+        for i = 1, args.n do parts[#parts + 1] = ser(args[i]) end
+        Scout[#Scout + 1] = string.format("[OUT] %s(%s) | pos=%s", self.Name, table.concat(parts, ", "), rootPos())
+    end
+    if hookmetamethod and getnamecallmethod and not _G.HamoBSHooked then
+        _G.HamoBSHooked = true
+        -- pcall: بعض منفّذات الجوال تفشل في hook __namecall وتُسقِط السكربت كله
+        local hooked = pcall(function()
+            local wrap = newcclosure or function(f) return f end
+            local old
+            old = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+                local cb = _G.HamoBSCB
+                if cb then
+                    local m = getnamecallmethod()
+                    if (m == "FireServer" or m == "InvokeServer") and typeof(self) == "Instance" then
+                        task.defer(cb, self, table.pack(...))
+                    end
+                end
+                return old(self, ...)
+            end))
+        end)
+        if not hooked then
+            _G.HamoBSHooked = false
+            warn("[HAMO] hookmetamethod غير مدعوم — سيتم استخدام وضع المراقبة البديل")
+        end
+    end
+    for _, r in ipairs(RS:GetDescendants()) do
+        local n = lw(r.Name)
+        if r:IsA("RemoteEvent") and (n:find("egg") or n:find("animal") or n:find("carry") or n:find("catch") or n:find("bank")) then
+            Track(r.OnClientEvent:Connect(function(...)
+                if not State.bs_scout or #Scout >= 250 then return end
+                local args = table.pack(...)
+                local parts = {}
+                for i = 1, args.n do parts[#parts + 1] = ser(args[i]) end
+                Scout[#Scout + 1] = string.format("[IN ] %s(%s) | pos=%s", r.Name, table.concat(parts, ", "), rootPos())
+            end))
+        end
+    end
+    table.insert(Cleanups, function() _G.HamoBSCB = nil end)
+
+    AddToggle(BS, "🎙️ تسجيل أوامر اللعبة (كسّر بيضة وضع حيواناً يدوياً)", "bs_scout")
+
+    local function report()
+        local o = {}
+        o[#o + 1] = "== Player =="
+        o[#o + 1] = attrsOf(Player)
+        o[#o + 1] = "موقعي: " .. rootPos()
+
+        o[#o + 1] = "\n== Zones =="
+        local perZone, total = {}, 0
+        local pk = workspace:FindFirstChild("AnimalPickups")
+        if pk then
+            for _, m in ipairs(pk:GetChildren()) do
+                local hrp = m:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    total += 1
+                    local z = zoneIdOf(m) or zoneOf(hrp.Position) or 0
+                    perZone[z] = (perZone[z] or 0) + 1
+                end
+            end
+        end
+        for _, z in ipairs(Zones) do
+            o[#o + 1] = string.format("Zone%d @%s | حيوانات: %d", z.n, ser(z.pos), perZone[z.n] or 0)
+        end
+
+        o[#o + 1] = "\n== AnimalPickups (أول 6 من " .. total .. ") =="
+        if pk then
+            for i, m in ipairs(pk:GetChildren()) do
+                if i > 6 then break end
+                local hrp = m:FindFirstChild("HumanoidRootPart")
+                local pr = hrp and hrp:FindFirstChild("StealPrompt", true)
+                o[#o + 1] = m.Name .. attrsOf(m) .. " | الندرة: " .. tostring(rarityOf(m))
+                if hrp then o[#o + 1] = "  HRP" .. attrsOf(hrp) .. " @" .. ser(hrp.Position) end
+                if pr then o[#o + 1] = "  Prompt" .. attrsOf(pr) .. " parent=" .. pr.Parent.ClassName end
+            end
+        end
+
+        o[#o + 1] = "\n== Eggs =="
+        for _, c in ipairs(workspace:GetChildren()) do
+            if lw(c.Name):find("egg") then
+                o[#o + 1] = c.Name .. " [" .. c.ClassName .. "]" .. attrsOf(c)
+                treeTo(o, c, 1, 2, 8)
+            end
+        end
+        local plot = myPlot()
+        if plot then
+            for _, c in ipairs(plot:GetChildren()) do
+                if lw(c.Name):find("egg") then
+                    o[#o + 1] = "plot." .. c.Name .. " [" .. c.ClassName .. "]" .. attrsOf(c)
+                    treeTo(o, c, 1, 2, 8)
+                end
+            end
+        end
+        local zb = workspace:FindFirstChild("Build") and workspace.Build:FindFirstChild("ZoneBuilds")
+        if zb then
+            local z1 = zb:GetChildren()[1]
+            if z1 then
+                o[#o + 1] = "ZoneBuilds." .. z1.Name .. attrsOf(z1)
+                treeTo(o, z1, 1, 2, 8)
+            end
+        end
+
+        o[#o + 1] = "\n== واجهة Trails/Pickaxes =="
+        local f = mainFrames()
+        if f then
+            local names = {}
+            for _, c in ipairs(f:GetChildren()) do names[#names + 1] = c.Name end
+            o[#o + 1] = "Frames: " .. table.concat(names, ", ")
+            for _, c in ipairs(f:GetChildren()) do
+                if lw(c.Name):find("trail") then
+                    o[#o + 1] = c.Name
+                    treeTo(o, c, 1, 3, 8)
+                end
+            end
+        else
+            o[#o + 1] = "MainGUI.Frames غير موجود"
+        end
+
+        o[#o + 1] = "\n== الريموتس المكتشفة =="
+        o[#o + 1] = "TrailShopRequest: " .. (RTrailShop and "✅" or "❌")
+        o[#o + 1] = "PickaxeShopRequest: " .. (RPickShop and "✅" or "❌")
+        o[#o + 1] = "PetsInventoryRemote: " .. (RPetsInv and "✅" or "❌")
+        o[#o + 1] = "EggHitRequest: " .. (REggHit and "✅" or "❌")
+        o[#o + 1] = "UpgradePlotRequest: " .. (RUpgrade and "✅" or "❌")
+
+        o[#o + 1] = "\n== سجل الأوامر =="
+        if #Scout == 0 then o[#o + 1] = "(فارغ، فعّل التسجيل ونفّذ أفعالك يدوياً)" end
+        for _, l in ipairs(Scout) do o[#o + 1] = l end
+        return table.concat(o, "\n")
+    end
+
+    AddButton(BS, "📋 نسخ تقرير التشخيص", nil, function(b)
+        local text = report()
+        if setclipboard then setclipboard(text) end
+        b.Text = setclipboard and ("✅ تم النسخ (" .. #text .. ")") or "⚠️ راجع الـ console"
+        if not setclipboard then print(text) end
+        Notify("التشخيص", "تم إنشاء التقرير", TH.cyan)
+        task.wait(1.8)
+        b.Text = "📋 نسخ تقرير التشخيص"
+    end)
+end)
+if not okBS then warn("[HAMO:BS] " .. tostring(errBS)) Notify("Break & Steal", "تعذّر بناء التبويب: " .. tostring(errBS), TH.red) end
+
+---------------------------------------------------------
+-- 🎛️ زر عائم + تصغير + إغلاق + اختصار
+---------------------------------------------------------
+Step("الزر العائم")
+local Toggle = Instance.new("TextButton")
+Toggle.Name = "FloatingToggle"
+Toggle.Size = UDim2.new(0, 52, 0, 52)
+Toggle.Position = UDim2.new(0, 16, 0.25, 0)
+Toggle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+Toggle.Text = "H"
+Toggle.TextColor3 = Color3.new(1, 1, 1)
+Toggle.Font = Enum.Font.GothamBlack
+Toggle.TextSize = 22
+Toggle.AutoButtonColor = false
+Toggle.Parent = Hub
+Corner(Toggle, 26)
+Grad(Toggle, TH.violet, TH.cyan, 45)
+Stroke(Toggle, Color3.new(1, 1, 1), 1.5, 0.4)
+MakeDraggable(Toggle, Toggle)
+
+local Pulse = Instance.new("Frame")
+Pulse.Size = UDim2.new(1, 0, 1, 0)
+Pulse.BackgroundTransparency = 1
+Pulse.Parent = Toggle
+Corner(Pulse, 26)
+local PulseStroke = Stroke(Pulse, TH.cyan, 1.5, 0.2)
+
+task.spawn(function()
+    while Alive and Pulse.Parent do
+        PulseStroke.Transparency = 0.2
+        tw(PulseStroke, 1.1, {Transparency = 0.95}, Enum.EasingStyle.Sine)
+        task.wait(1.15)
+    end
+end)
+
+local function ShowMain(state)
+    if state then
+        Main.Visible = true
+        Main.Size = UDim2.new(0, 560, 0, 400)
+        tw(Main, 0.25, {Size = UDim2.new(0, 620, 0, 440)}, Enum.EasingStyle.Back)
+    else
+        tw(Main, 0.18, {Size = UDim2.new(0, 560, 0, 400)})
+        task.wait(0.19)
+        Main.Visible = false
+    end
+end
+
+Toggle.MouseButton1Click:Connect(function()
+    ShowMain(not Main.Visible)
+end)
+
+Track(UIS.InputBegan:Connect(function(i, gp)
+    if gp then return end
+    if i.KeyCode == Enum.KeyCode.RightShift then
+        ShowMain(not Main.Visible)
+    end
+end))
+
+local minimized = false
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    Sidebar.Visible = not minimized
+    Content.Visible = not minimized
+    Footer.Visible = not minimized
+    tw(Main, 0.25, {Size = minimized and UDim2.new(0, 620, 0, 54) or UDim2.new(0, 620, 0, 440)}, Enum.EasingStyle.Quad)
+end)
+
+CloseBtn.MouseButton1Click:Connect(function()
+    Alive = false
+    for k in pairs(State) do State[k] = false end
+    for _, fn in ipairs(Cleanups) do pcall(fn) end
+    local h = GetHum()
+    if h then
+        h.WalkSpeed = 16
+        workspace.CurrentCamera.CameraSubject = h
+    end
+    for _, c in ipairs(Conns) do pcall(function() c:Disconnect() end) end
+    Hub:Destroy()
+end)
+
+-- تفعيل أول تبويب
+TabBtns[1].BackgroundTransparency = 0.88
+TabBtns[1].TextColor3 = TH.text
+Pages[1].Visible = true
+do
+    local ind = TabBtns[1]:FindFirstChildOfClass("Frame")
+    if ind then
+        ind.Visible = true
+        ind.Size = UDim2.new(0, 3, 0, 20)
+    end
+end
+
+---------------------------------------------------------
+-- FPS / Ping
+---------------------------------------------------------
+do
+    local frames, acc = 0, 0
+    Track(RunService.RenderStepped:Connect(function(dt)
+        frames += 1
+        acc += dt
+        if acc >= 0.5 then
+            local fps = math.floor(frames / acc)
+            local ping = 0
+            pcall(function() ping = math.floor((Player:GetNetworkPing() or 0) * 1000) end)
+            StatsLbl.Text = string.format("%d FPS  •  %d ms", fps, ping)
+            frames, acc = 0, 0
+        end
+    end))
+end
+
+pcall(function()
+    StarterGui:SetCore("SendNotification", {
+        Title = "HAMO RBX v27",
+        Text = "تم التحميل ✅ اضغط زر H العائم",
+        Duration = 6,
+    })
+end)
+
+Step("جاهز")
+Notify("HAMO v27.2", "الواجهة جاهزة ✨ (إصلاح AnchorPoint)", TH.violet)
+
+if not fireproximityprompt then
+    warn("[HAMO] المنفذ لا يدعم fireproximityprompt")
+end
+end
+
+local ok, err = pcall(Boot)
+if not ok then
+    local msg = tostring(err)
+    warn("[HAMO] " .. msg)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "HAMO خطأ",
+            Text = string.sub(msg, 1, 140),
+            Duration = 20,
+        })
+    end)
+    -- 📱 لوحة خطأ مرئية (الجوال لا يُظهر الـ console)
+    pcall(function()
+        local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+        if not pg then return end
+        local old = pg:FindFirstChild("HamoErrorPanel")
+        if old then old:Destroy() end
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "HamoErrorPanel"
+        sg.ResetOnSpawn = false
+        sg.DisplayOrder = 9999
+        sg.Parent = pg
+        local f = Instance.new("Frame")
+        f.Size = UDim2.new(0, 420, 0, 150)
+        f.Position = UDim2.new(0.5, 0, 0, 60)
+        f.AnchorPoint = Vector2.new(0.5, 0)
+        f.BackgroundColor3 = Color3.fromRGB(30, 10, 14)
+        f.BorderSizePixel = 0
+        f.Parent = sg
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 12) c.Parent = f
+        local s = Instance.new("UIStroke") s.Color = Color3.fromRGB(255, 72, 100) s.Thickness = 1.5 s.Parent = f
+        local t = Instance.new("TextLabel")
+        t.BackgroundTransparency = 1
+        t.Position = UDim2.new(0, 14, 0, 10)
+        t.Size = UDim2.new(1, -28, 0, 22)
+        t.Font = Enum.Font.GothamBold
+        t.Text = "⚠️ HAMO — خطأ أثناء التشغيل  [" .. tostring(_G.HamoStep or "?") .. "]"
+        t.TextColor3 = Color3.fromRGB(255, 120, 140)
+        t.TextSize = 15
+        t.TextXAlignment = Enum.TextXAlignment.Left
+        t.Parent = f
+        local d = Instance.new("TextLabel")
+        d.BackgroundTransparency = 1
+        d.Position = UDim2.new(0, 14, 0, 38)
+        d.Size = UDim2.new(1, -28, 1, -48)
+        d.Font = Enum.Font.Code
+        d.Text = msg
+        d.TextColor3 = Color3.fromRGB(240, 220, 225)
+        d.TextSize = 12
+        d.TextWrapped = true
+        d.TextXAlignment = Enum.TextXAlignment.Left
+        d.TextYAlignment = Enum.TextYAlignment.Top
+        d.Parent = f
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0, 80, 0, 26)
+        b.Position = UDim2.new(1, -94, 1, -34)
+        b.BackgroundColor3 = Color3.fromRGB(255, 72, 100)
+        b.Text = "إغلاق"
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 12
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Parent = f
+        local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 8) bc.Parent = b
+        b.MouseButton1Click:Connect(function() sg:Destroy() end)
+    end)
+end
